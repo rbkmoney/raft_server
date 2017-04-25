@@ -1,0 +1,17 @@
+{application, raft, [
+    {description, "Raft proto"},
+    {vsn, "1"},
+    {registered, []},
+    {applications, [
+        kernel,
+        stdlib,
+        genlib
+    ]},
+    {env, []},
+    {modules, []},
+    {maintainers, [
+        "Petr Kozorezov <petr.kozorezov@gmail.com>"
+    ]},
+    {licenses, []},
+    {links, []}
+]}.
