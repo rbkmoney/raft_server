@@ -4,30 +4,23 @@
 %%%  - с одной стороны по максимуму придерживаться терминологии орининального документа (https://raft.github.io/raft.pdf);
 %%%  - с другой делать в стили OTP.
 %%%
-%%%
-%%% TODO:
-%%%  - сделать обработку AppendEntries
-%%%  - запустить!
-%%%  - сделать понятие "дельта"
-%%%  - сделать поведение и нормальную работу с persistance state
+%%% Отличия от оригинала:
+%%%  - send_command_rpc с проксированием на мастер
+%%%  - отсутствие понятия fsm, apply и тд, это всё забота backend'а
 %%%  -
 %%%
-
-% лидер:
-%  - добавить в лог
-%  - реплицировать на мажорити
-%  - применить к автомату
-
-% слейвы:
-%  - добавить в лог
-%  - применить к автомату
+%%% TODO:
+%%%  - сделать поведение и нормальную работу с persistance state
+%%%  - сделать отдельный модуль для RPC
+%%%  - сделать RPC на command и проксирование его (и откуда вернётся ответ туда и посылается следующий запрос) + идемпотентость команд?
+%%%  - handle info + timeout
+%%%  -
 
 -module(raft_server).
 
 %% API
--export([start_link   /2]).
--export([write_command/3]).
--export([read_command /3]).
+-export([start_link  /4]).
+-export([send_command/3]).
 
 %% gen_server callbacks
 -behaviour(gen_server).
@@ -48,60 +41,70 @@
     broadcast_timeout => timeout_ms()
 }.
 
-%% версия без регистрации не имеет смысла (или я не прав?)
--spec start_link(mg_utils:gen_reg_name(), options()) ->
-    mg_utils:gen_start_ret().
-start_link(RegName, Options) ->
-    gen_server:start_link(RegName, ?MODULE, Options, []).
+-type raft_term    () :: non_neg_integer().
+-type index        () :: non_neg_integer().
+-type command      () :: term().
+-type log_entry    () :: {raft_term(), command()}.
+-type backend_state() :: term().
 
--spec write_command(mg_utils:gen_ref(), fsm_command(), mg_utils:deadline()) ->
-    _Reply.
-write_command(Ref, Command, Deadline) ->
+
+%% behaviour
+-callback init(_Args) ->
+    backend_state().
+
+%% это вместо apply
+-callback commit(index(), backend_state()) ->
+    backend_state().
+
+-callback get_last_commit_index(backend_state()) ->
+    index().
+
+%% log
+-callback get_last_log_index(backend_state()) ->
+    index().
+-callback get_log_entry(index(), backend_state()) ->
+    log_entry().
+% (From, To)
+-callback get_log_entries(index(), index(), backend_state()) ->
+    [log_entry()].
+-callback append_log_entries(index(), [log_entry()], backend_state()) ->
+    backend_state().
+
+
+
+%% версия без регистрации не имеет смысла (или я не прав?)
+-spec start_link(mg_utils:gen_reg_name(), module(), _Args, options()) ->
+    mg_utils:gen_start_ret().
+start_link(RegName, Module, Args, Options) ->
+    gen_server:start_link(RegName, ?MODULE, {Module, Args, Options}, []).
+
+-spec send_command(mg_utils:gen_ref(), command(), mg_utils:deadline()) ->
+    ok.
+send_command(Ref, Command, Deadline) ->
     case mg_utils:is_deadline_reached(Deadline) of
         false ->
-            case gen_server:call(Ref, {write_command, Command, Deadline}, mg_utils:deadline_to_timeout(Deadline)) of
-                {ok, Reply} ->
-                    Reply;
+            case gen_server:call(Ref, {send_command, Command}, mg_utils:deadline_to_timeout(Deadline)) of
+                ok ->
+                    ok;
                 {error, {leader_is, LeaderRef}} ->
-                    timer:sleep(100), % TODO
-                    write_command(LeaderRef, Command, Deadline);
+                    ok = timer:sleep(100), % TODO
+                    send_command(LeaderRef, Command, Deadline);
                 {error, no_leader} ->
                     % возможно он уже избрался
-                    timer:sleep(100), % TODO
-                    write_command(Ref, Command, Deadline);
+                    ok = timer:sleep(100), % TODO
+                    send_command(Ref, Command, Deadline);
                 {error, timeout} ->
                     % по аналогии с gen_server
-                    exit({timeout, {?MODULE, write_command, [Ref, Command, Deadline]}})
+                    exit({timeout, {?MODULE, send_command, [Ref, Command, Deadline]}})
             end;
         true ->
             % по аналогии с gen_server
-            exit({timeout, {?MODULE, write_command, [Ref, Command, Deadline]}})
-    end.
-
--spec read_command(mg_utils:gen_ref(), fsm_command(), mg_utils:deadline()) ->
-    _Reply.
-read_command(Ref, Command, Deadline) ->
-    case mg_utils:is_deadline_reached(Deadline) of
-        false ->
-            case gen_server:call(Ref, {read_command, Command, Deadline}, mg_utils:deadline_to_timeout(Deadline)) of
-                {ok, Reply} ->
-                    Reply;
-                {error, timeout} ->
-                    % по аналогии с gen_server
-                    exit({timeout, {?MODULE, read_command, [Ref, Command, Deadline]}})
-            end;
-        true ->
-            % по аналогии с gen_server
-            exit({timeout, {?MODULE, read_command, [Ref, Command, Deadline]}})
+            exit({timeout, {?MODULE, send_command, [Ref, Command, Deadline]}})
     end.
 
 %%
 %% gen_server callbacks
 %%
--type raft_term  () :: non_neg_integer().
--type index      () :: non_neg_integer().
--type fsm_command() :: term().
-
 -type follower_state () :: {Next::index(), Match::index(), Heartbeat::timestamp_ms()}.
 -type followers_state() :: #{mg_utils:gen_ref() => follower_state()}.
 -type role() ::
@@ -120,23 +123,14 @@ read_command(Ref, Command, Deadline) ->
     % текущий терм (вообще, имхо, слово "эпоха" тут более подходящее)
     current_term => raft_term(),
 
-    % индекс последней команды, закоммиченной в лог лидера
-    commit_index => index(),
-
-    % текущий лог
-    log          => log(),
-
-    % индекс последней команды, применённой к стейт машине
-    last_applied => index(),
-
-    % состояние стейт машины
-    fsm          => fsm()
+    % состояние стейт машины и лог
+    backend_state => backend_state()
 }.
 
--spec init(options()) ->
+-spec init(_) ->
     mg_utils:gen_server_init_ret(state()).
-init(Options) ->
-    NewState = new_state(Options),
+init(Args) ->
+    NewState = new_state(Args),
     {ok, NewState, get_timer_timeout(NewState)}.
 
 %%
@@ -144,23 +138,9 @@ init(Options) ->
 %%
 -spec handle_call(_Call, mg_utils:gen_server_from(), state()) ->
     mg_utils:gen_server_handle_call_ret(state()).
-handle_call({CommandType, Command, Deadline}, _From, State) ->
-    {Reply, NewState} =
-        case mg_utils:is_deadline_reached(Deadline) of
-            false ->
-                case CommandType of
-                    write_command -> handle_write_command(Command, State);
-                    read_command  -> {{reply, handle_read_command(Command, State)}, State}
-                end;
-            true ->
-                {{reply, {error, timeout}}, State}
-        end,
-    case Reply of
-        {reply, ReplyBody} ->
-            {reply, ReplyBody, NewState, get_timer_timeout(NewState)};
-        noreply ->
-            {noreply, NewState, get_timer_timeout(NewState)}
-    end.
+handle_call({send_command, Command}, _From, State) ->
+    NewState = handle_command(Command, State),
+    {reply, ok, NewState, get_timer_timeout(NewState)}.
 
 -spec handle_cast(rpc_message(), state()) ->
     mg_utils:gen_server_handle_cast_ret(state()).
@@ -187,21 +167,19 @@ terminate(_, _) ->
 %%
 %% common handlers
 %%
--spec new_state(options()) ->
+-spec new_state({module(), _Args, options()}) ->
     state().
-new_state(Options) ->
-    become_follower(
+new_state({BackendMod, Args, Options}) ->
+    State =
         #{
-            options      => Options,
-            timer        => undefined,
-            role         => {follower, undefined},
-            current_term => 0,
-            log          => log_new(),
-            commit_index => 0,
-            last_applied => 0,
-            fsm          => fsm_new()
-        }
-    ).
+            options       => Options,
+            timer         => undefined,
+            role          => {follower, undefined},
+            current_term  => 0,
+            backend_mod   => BackendMod,
+            backend_state => BackendMod:init(Args)
+        },
+    become_follower(State#{current_term := get_term_from_log(backend_get_last_log_index(State), State)}).
 
 -spec handle_timeout(state()) ->
     state().
@@ -210,27 +188,22 @@ handle_timeout(State = #{role := {leader, _}}) ->
 handle_timeout(State = #{role := _}) ->
     become_candidate(State).
 
--spec handle_write_command(fsm_command(), state()) ->
+-spec handle_command(command(), state()) ->
     {{reply, _} | noreply, state()}.
-handle_write_command(Command, State = #{role := {leader, _}}) ->
+handle_command(Command, State = #{role := {leader, _}, current_term := CurrentTerm}) ->
     % добавить результат в лог (если запись уже есть, то ответить (как это узнать? чем?))
     % запустить процесс репликации (а если он уже идёт?)
     % в данный момент и при получении каждого ответа проверять, не прошла ли репликация на мажорити
     % когда пройдёт — применить к автомату (в процессе подвинуть указатель последнего апплая) и ответить
-    NewState = append_to_log(Command, State),
-    % TODO
+    NewState = backend_append_log_entries(backend_get_last_log_index(State), [{CurrentTerm, Command}], State),
+    % TODO reply after commit
     {{reply, {ok, ok}}, try_send_append_entries(NewState)};
-handle_write_command(_, State = #{role := {candidate, _}}) ->
+handle_command(_, State = #{role := {candidate, _}}) ->
     {{reply, {error, no_leader}}, State};
-handle_write_command(_, State = #{role := {follower, undefined}}) ->
+handle_command(_, State = #{role := {follower, undefined}}) ->
     {{reply, {error, no_leader}}, State};
-handle_write_command(_, State = #{role := {follower, Leader}}) ->
+handle_command(_, State = #{role := {follower, Leader}}) ->
     {{reply, {error, {leader_is, Leader}}}, State}.
-
--spec handle_read_command(fsm_command(), state()) ->
-    _Reply.
-handle_read_command(Command, #{fsm := Fsm}) ->
-    {ok, fsm_read(Command, Fsm)}.
 
 -spec handle_rpc(rpc_message(), state()) ->
     state().
@@ -260,13 +233,13 @@ handle_rpc_request(append_entries, Body, Leader, State = #{role := {follower, un
 handle_rpc_request(append_entries, Body, Leader, State = #{role := {candidate, _}}) ->
     % Выбрали другого... ;-(
     handle_rpc_request(append_entries, Body, Leader, update_follower(Leader, State));
-handle_rpc_request(append_entries, {Prev, Entries, CommitIndex}, _, State0 = #{role := {follower, _}, log := Log}) ->
+handle_rpc_request(append_entries, {Prev, Entries, CommitIndex}, _, State0 = #{role := {follower, _}}) ->
     {Result, State1} = try_append_to_log(Prev, Entries, State0),
     State2 =
         case Result of
             % 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
             % когда возможно, что leaderCommit будет меньше чем commitIndex
-            true  -> try_apply_commited(State1#{commit_index := erlang:min(log_get_last_index(Log), CommitIndex)});
+            true  -> backend_commit(erlang:min(backend_get_last_log_index(State1), CommitIndex), State1);
             false -> State1
         end,
     {Result, schedule_election_timer(State2)}.
@@ -290,26 +263,24 @@ handle_rpc_response(append_entries, From, Succeed, State = #{role := {leader, Fo
                 {NextIndex - 1, MatchIndex, Heartbeat, 0}
         end,
     try_send_append_entries(
-        try_apply_commited(
-            try_updated_commit_index(
-                update_leader_follower(From, NewFollowerState, State)))).
+        try_commit(
+            backend_get_last_log_index(State),
+            backend_get_commit_index  (State),
+            update_leader_follower(From, NewFollowerState, State)
+        )
+    ).
 
 %%
 
 -spec try_append_to_log(undefined | log_entry(), [log_entry()], state()) ->
     {boolean(), state()}.
-try_append_to_log({PrevTerm, PrevIndex}, Entries, State = #{log := Log}) ->
-    case (log_get_last_index(Log) >= PrevIndex) andalso log_get_term(PrevIndex, Log) of
+try_append_to_log({PrevTerm, PrevIndex}, Entries, State) ->
+    case (backend_get_last_log_index(State) >= PrevIndex) andalso get_term_from_log(PrevIndex, State) of
         PrevTerm ->
-            {true, State#{log := log_append(PrevIndex, Entries, Log)}};
+            {true, backend_append_log_entries(PrevIndex, Entries, State)};
         _ ->
             {false, State}
     end.
-
--spec append_to_log(fsm_command(), state()) ->
-    state().
-append_to_log(Command, State=#{log := Log, current_term := CurrentTerm}) ->
-    State#{log := log_append(log_get_last_index(Log), [{CurrentTerm, Command}], Log)}.
 
 -spec add_vote(mg_utils:gen_ref(), state()) ->
     state().
@@ -326,33 +297,17 @@ try_become_leader(State = #{role := {candidate, Votes}}) ->
             State
     end.
 
--spec try_apply_commited(state()) ->
+-spec try_commit(index(), index(), state()) ->
     state().
-try_apply_commited(State = #{last_applied := LastApplied, commit_index := CommitIndex}) when LastApplied =:= CommitIndex ->
-    State;
-try_apply_commited(State = #{log := Log, last_applied := LastApplied, fsm := Fsm}) ->
-    ApplyingIndex = LastApplied + 1,
-    Command = log_get_command(ApplyingIndex, Log),
-    NewFsm = fsm_apply(Command, Fsm),
-    try_apply_commited(State#{last_applied := ApplyingIndex, fsm := NewFsm}).
-
--spec try_updated_commit_index(state()) ->
-    state().
-try_updated_commit_index(State=#{log := Log}) ->
-    try_updated_commit_index(log_get_last_index(Log), State).
-
--spec try_updated_commit_index(index(), state()) ->
-    state().
-try_updated_commit_index(IndexN, State = #{current_term := CurrentTerm, commit_index := CommitIndex, log := Log}) ->
+try_commit(IndexN, CommitIndex, State = #{current_term := CurrentTerm}) ->
     % If there exists an N such that N > commitIndex, a majority
     % of matchIndex[i] ≥ N, and log[N].term == currentTerm:
     % set commitIndex = N (§5.3, §5.4)
-    LogNTerm = log_get_term(IndexN, Log),
-    case IndexN > CommitIndex andalso LogNTerm =:= CurrentTerm of
+    case IndexN > CommitIndex andalso get_term_from_log(IndexN, State) =:= CurrentTerm of
         true ->
             case is_replicated(IndexN, State) of
-                true  -> State#{commit_index := IndexN};
-                false -> try_updated_commit_index(IndexN - 1, State)
+                true  -> backend_commit(IndexN, State);
+                false -> try_commit(IndexN - 1, CommitIndex, State)
             end;
         false ->
             State
@@ -384,8 +339,8 @@ new_followers_state(State = #{options := #{others := Others}}) ->
 
 -spec new_follower_state(state()) ->
     follower_state().
-new_follower_state(#{log := Log}) ->
-    {log_get_last_index(Log) + 1, 0, 0, 0}.
+new_follower_state(State) ->
+    {backend_get_last_log_index(State) + 1, 0, 0, 0}.
 
 %%
 %% role changing
@@ -458,11 +413,11 @@ update_follower(Leader, State = #{role := {follower, _}}) ->
 
 -spec send_request_votes(state()) ->
     ok.
-send_request_votes(State = #{options := #{others := Others}, log := Log}) ->
-    LastIndex = log_get_last_index(Log),
+send_request_votes(State = #{options := #{others := Others}}) ->
+    LastIndex = backend_get_last_log_index(State),
     ok = lists:foreach(
             fun(Ref) ->
-                ok = send_request(Ref, request_vote, {LastIndex, log_get_term(LastIndex, Log)}, State)
+                ok = send_request(Ref, request_vote, {LastIndex, get_term_from_log(LastIndex, State)}, State)
             end,
             Others
         ).
@@ -487,8 +442,8 @@ try_send_append_entries(State = #{role := {leader, FollowersState}}) ->
 
 -spec try_send_append_entries(mg_utils:gen_ref(), follower_state(), state()) ->
     follower_state().
-try_send_append_entries(To, FollowerState, State = #{options := #{broadcast_timeout := Timeout}, log := Log}) ->
-    LastLogIndex = log_get_last_index(Log),
+try_send_append_entries(To, FollowerState, State = #{options := #{broadcast_timeout := Timeout}}) ->
+    LastLogIndex = backend_get_last_log_index(State),
     Now = now_ms(),
     case FollowerState of
         {NextIndex, MatchIndex, Heartbeat, _}
@@ -513,9 +468,9 @@ try_send_append_entries(To, FollowerState, State = #{options := #{broadcast_time
 
 -spec send_append_entries(mg_utils:gen_ref(), index(), index(), state()) ->
     ok.
-send_append_entries(To, NextIndex, MatchIndex, State = #{commit_index := CommitIndex, log := Log}) ->
-    Prev = {log_get_term(MatchIndex, Log), MatchIndex},
-    Body = {Prev, log_get_range(MatchIndex, NextIndex, Log), CommitIndex},
+send_append_entries(To, NextIndex, MatchIndex, State) ->
+    Prev = {get_term_from_log(MatchIndex, State), MatchIndex},
+    Body = {Prev, backend_get_log_entries(MatchIndex, NextIndex, State), backend_get_commit_index(State)},
     ok = send_request(To, append_entries, Body, State).
 
 %%
@@ -555,6 +510,14 @@ randomize_timeout(Const) ->
     Const.
 
 %%
+%% log
+%%
+-spec get_term_from_log(index(), state()) ->
+    term().
+get_term_from_log(Index, State) ->
+    element(1, backend_get_log_entry(Index, State)).
+
+%%
 %% RPC
 %%
 -type rpc_message() :: {
@@ -584,76 +547,39 @@ send_response(To, Type, Result, #{options := #{self := Self}, current_term := Cu
 send(Ref, Message) ->
     ok = gen_server:cast(Ref, Message).
 
-
 %%
-%% log
+%% backend
 %%
--type log_entry() :: {raft_term(), fsm_command()}.
--type log() :: [log_entry()].
+-spec backend_commit(index(), state()) ->
+    state().
+backend_commit(Index, State = #{backend_mod := BackendMod, backend_state := BackendState}) ->
+    State#{backend_state := BackendMod:commit(Index, BackendState)}.
 
--spec log_new() ->
-    log().
-log_new() ->
-    [].
-
--spec log_get_last_index(log()) ->
+-spec backend_get_commit_index(state()) ->
     index().
-log_get_last_index(Log) ->
-    erlang:length(Log).
+backend_get_commit_index(#{backend_mod := BackendMod, backend_state := BackendState}) ->
+    BackendMod:get_last_commit_index(BackendState).
 
--spec log_get(index(), log()) ->
+-spec backend_get_last_log_index(state()) ->
+    index().
+backend_get_last_log_index(#{backend_mod := BackendMod, backend_state := BackendState}) ->
+    BackendMod:get_last_log_index(BackendState).
+
+-spec backend_get_log_entry(index(), state()) ->
     [log_entry()].
-log_get(Index, Log) ->
-    lists:nth(Index, Log).
+backend_get_log_entry(Index, #{backend_mod := BackendMod, backend_state := BackendState}) ->
+    BackendMod:backend_get_log_entry(Index, BackendState).
 
--spec log_get_term(index(), log()) ->
-    term().
-log_get_term(0, _) ->
-    0;
-log_get_term(Index, Log) ->
-    {Term, _} = log_get(Index, Log),
-    Term.
-
--spec log_get_command(index(), log()) ->
-    fsm_command().
-log_get_command(0, Log) ->
-    erlang:error(badarg, [0, Log]);
-log_get_command(Index, Log) ->
-    {_, Command} = log_get(Index, Log),
-    Command.
-
-%% (From, To)
--spec log_get_range(index(), index(), log()) ->
+-spec backend_get_log_entries(index(), index(), state()) ->
     [log_entry()].
-log_get_range(From, To, Log) ->
-    lists:sublist(Log, From + 1, To - From - 1).
+backend_get_log_entries(From, To, #{backend_mod := BackendMod, backend_state := BackendState}) ->
+    BackendMod:get_log_entries(From, To, BackendState).
 
--spec log_append(index(), [log_entry()], log()) ->
-    log().
-log_append(PrevN, LogEntries, Log) ->
-    lists:sublist(Log, 1, PrevN) ++ LogEntries.
+-spec backend_append_log_entries(index(), [log_entry()], state()) ->
+    state().
+backend_append_log_entries(PrevIndex, Entries, State = #{backend_mod := BackendMod, backend_state := BackendState}) ->
+    State#{backend_state := BackendMod:append_log_entries(PrevIndex, Entries, BackendState)}.
 
-%%
-%% fsm
-%%
--type fsm() :: [fsm_command()].
-
--spec fsm_new() ->
-    fsm().
-fsm_new() ->
-    undefined.
-
--spec fsm_apply(fsm_command(), fsm()) ->
-    fsm().
-fsm_apply({set, V}, undefined) ->
-    V;
-fsm_apply({reset, V}, _Fsm) ->
-    V.
-
--spec fsm_read(fsm_command(), fsm()) ->
-    fsm().
-fsm_read(get, Fsm) ->
-    Fsm.
 
 %%
 %% utils
