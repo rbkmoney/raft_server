@@ -34,22 +34,27 @@ all() ->
     _.
 simple_test(_) ->
     dbg:tracer(), dbg:p(all, c),
-    dbg:tpl({raft_server, 'set_role', '_'}, x),
-    % Cluster = [e, a, b],
-    Cluster = [e, a, b, c, d],
+    % dbg:tpl({raft_server, 'set_role', '_'}, x),
+    % dbg:tpl({raft_server, 'handle_info', '_'}, x),
+    dbg:tpl({raft_server_rpc_erl, 'send', '_'}, x),
+    dbg:tpl({raft_server_rpc_erl, 'recv', '_'}, x),
+    Cluster = [e, a, b],
+    % Cluster = [e, a, b, c, d],
     ClusterPids = start_cluster(Cluster),
 
-    ok = test_write(e, {set, hello1}),
-    ok = timer:sleep(100),
-    hello1 = test_read(a, get),
-    ok = timer:sleep(100),
-    hello1 = test_read(e, get),
+    timer:sleep(1000),
 
-    ok = test_write(a, {reset, hello2}),
-    ok = timer:sleep(100),
-    hello2 = test_read(a, get),
-    ok = timer:sleep(100),
-    hello2 = test_read(e, get),
+    % ok = test_write(e, {set, hello1}),
+    % ok = timer:sleep(100),
+    % hello1 = test_read(a, get),
+    % ok = timer:sleep(100),
+    % hello1 = test_read(e, get),
+
+    % ok = test_write(a, {reset, hello2}),
+    % ok = timer:sleep(100),
+    % hello2 = test_read(a, get),
+    % ok = timer:sleep(100),
+    % hello2 = test_read(e, get),
 
     mg_utils:stop_wait_all(ClusterPids, shutdown, 1000).
 
@@ -61,7 +66,7 @@ start_cluster(Cluster) ->
 -spec start_one(name(), cluster()) ->
     pid().
 start_one(Name, Cluster) ->
-    {ok, P} = raft_server:start_link(reg_name(Name), options(Name, Cluster)),
+    {ok, P} = raft_server:start_link(reg_name(Name), raft_server_fsm, undefined, options(Name, Cluster)),
     P.
 
 -spec test_write(name(), _Cmd) ->
