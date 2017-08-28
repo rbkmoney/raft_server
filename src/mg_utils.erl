@@ -18,8 +18,8 @@
 -export_type([gen_server_handle_info_ret/1]).
 -export_type([gen_server_code_change_ret/1]).
 -export_type([supervisor_ret            /0]).
--export([gen_reg_name2_ref/1]).
 -export([gen_where        /1]).
+-export([gen_send         /2]).
 -export([get_msg_queue_len/1]).
 
 %% deadlines
@@ -57,6 +57,7 @@
 -export([genlib_retry_new/1]).
 
 -export([stop_wait_all/3]).
+-export([stop_wait    /3]).
 
 -export([concatenate_namespaces/2]).
 
@@ -134,20 +135,27 @@
     | {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}
 .
 
--spec
-gen_reg_name2_ref(gen_reg_name()) -> gen_ref().
-gen_reg_name2_ref({local, Name} ) -> Name;
-gen_reg_name2_ref(V={global, _} ) -> V;
-gen_reg_name2_ref(V={via, _, _} ) -> V. % Is this correct?
-
--spec gen_where(gen_reg_name()) ->
+-spec gen_where(gen_ref()) ->
     pid() | undefined.
 gen_where({global, Name}) ->
     global:whereis_name(Name);
 gen_where({via, Module, Name}) ->
     Module:whereis_name(Name);
-gen_where({local, Name})  ->
-    erlang:whereis(Name).
+gen_where(Name) when is_atom(Name) ->
+    erlang:whereis(Name);
+gen_where({Node, Name}) when is_atom(Node) andalso is_atom(Name) ->
+    exit(todo);
+gen_where(Pid) when is_pid(Pid) ->
+    Pid.
+
+-spec gen_send(gen_ref(), Msg::term()) ->
+    ok.
+gen_send({global, Name}, Msg) ->
+    _ = global:send(Name, Msg), ok;
+gen_send({via, Module, Name}, Msg) ->
+    _ = Module:send(Name, Msg), ok;
+gen_send(Dest, Msg) ->
+    _ = erlang:send(Dest, Msg), ok.
 
 -spec get_msg_queue_len(gen_reg_name()) ->
     pos_integer() | undefined.
