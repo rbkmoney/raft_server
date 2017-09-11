@@ -2,21 +2,15 @@
 
 %% raft_server_rpc
 -behaviour(raft_server_rpc).
--export([init/1, send/3, recv/2]).
+-export([send/3, recv/2]).
 
--type state() :: _.
 -type endpoint() :: mg_utils:gen_ref().
 
--spec init(_Args) ->
-    state().
-init(_) ->
-    undefined.
-
 %% this is a copy of gen_server:cast
--spec send(endpoint(), raft_server_rpc:message(), state()) ->
-    state().
-send(To, Message, _) ->
-    FullMessage = {?MODULE, Message},
+-spec send(_, endpoint(), raft_server_rpc:message()) ->
+    ok.
+send(_, To, Message) ->
+    FullMessage = {raft_server_rpc, Message},
     ok = case To of
             {global, GlobalName} ->
                 catch global:send(GlobalName, FullMessage);
@@ -30,9 +24,7 @@ send(To, Message, _) ->
                 end
         end.
 
--spec recv(term(), state()) ->
-    {raft_server_rpc:message(), state()} | invalid_data.
-recv({?MODULE, Message}, _) ->
-    {Message, undefined};
-recv(_, _) ->
-    invalid_data.
+-spec recv(_, term()) ->
+    raft_server_rpc:message().
+recv(_, Message) ->
+    Message.

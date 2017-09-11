@@ -1,14 +1,23 @@
+%%%
+%%% Протокол обмена сообщениями между raft серверами.
+%%% Не подразумевает гарантию доставки и очерёдности сообщений.
+%%% Общается с raft_server через сообщение вида {raft_server_rpc, Data}
+%%%
 -module(raft_server_rpc).
 
+%% API
+-export_type([rpc         /0]).
 -export_type([endpoint    /0]).
 -export_type([message     /0]).
 -export_type([message_type/0]).
 -export_type([message_body/0]).
--export_type([state       /0]).
--export([init/2]).
--export([send/4]).
--export([recv/3]).
+-export([send/3]).
+-export([recv/2]).
 
+%%
+%% API
+%%
+-type rpc() :: mg_utils:mod_ops().
 -type endpoint() :: term().
 -type message() :: {
     request | {response, _Success::boolean()},
@@ -18,37 +27,27 @@
     _From       ::endpoint()
 }.
 -type message_type() ::
-    %  command
       request_vote
     | append_entries
 .
 -type message_body() :: term().
--type state() :: term().
 
 %%
 
--callback init(_Args) ->
-    state().
+-callback send(_Args, endpoint(), message()) ->
+    ok.
 
--callback send(endpoint(), message(), state()) ->
-    state().
-
--callback recv(_Data, state()) ->
-    state() | invalid_data.
+-callback recv(_Args, _Data) ->
+    message().
 
 %%
 
--spec init(module(), _Args) ->
-    state().
-init(Module, Args) ->
-    Module:init(Args).
+-spec send(mg_utils:mod_opts(), endpoint(), message()) ->
+    ok.
+send(RPC, To, Message) ->
+    mg_utils:apply_mod_opts(RPC, send, [To, Message]).
 
--spec send(module(), endpoint(), message(), state()) ->
-    state().
-send(Module, To, Message, State) ->
-    Module:send(To, Message, State).
-
--spec recv(module(), _, state()) ->
-    {message(), state()} | invalid_data.
-recv(Module, Info, State) ->
-    Module:recv(Info, State).
+-spec recv(mg_utils:mod_opts(), _) ->
+    message().
+recv(RPC, Info) ->
+    mg_utils:apply_mod_opts(RPC, recv, [Info]).

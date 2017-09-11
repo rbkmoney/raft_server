@@ -1,26 +1,26 @@
 %%%
 %%% Основная идея в том, чтобы сделать максимально лёгкую в стиле OTP реализацию Raft.
-%%% В процессе написания была попытка усидеть на 2х стульях сразу:
+%%% В процессе написания была попытка усидеть на 3х стульях сразу:
 %%%  - с одной стороны по максимуму придерживаться терминологии орининального документа (https://raft.github.io/raft.pdf);
 %%%  - с другой делать в стили OTP.
-%%%
-%%% Отличия от оригинала:
-%%%  - send_command_rpc с проксированием на мастер
-%%%  - отсутствие понятия fsm, apply и тд, это всё забота backend'а
-%%%  -
+%%%  - с третьей сделать наиболее обобщённо и гибко
 %%%
 %%% TODO:
 %%%  - RPC на command и проксирование его (и откуда вернётся ответ туда и посылается следующий запрос)
-%%%  - идемпотентость команд?
+%%%  - убрать gen_server
+%%%  - идемпотентость команд
 %%%  - handle info + timeout
-%%%  - SCTP RPC
 %%%  -
 %%%
+%%% Вопросы:
+%%%  - нужен ли тут дедлайн или его перенести на уровень дальше
+%%%  -
 -module(raft_server).
 
 %% API
--export([start_link  /4]).
--export([send_command/3]).
+-export([start_link/5]).
+-export([get_leader/1]).
+% -export([send_command/3]).
 
 %% gen_server callbacks
 -behaviour(gen_server).
@@ -32,6 +32,7 @@
 -type timeout_ms  () :: non_neg_integer().
 -type timestamp_ms() :: non_neg_integer().
 
+% ниже важный коментарий!
 % election_timeout << broadcast_timeout << mean_time_between_failures
 % election_timeout ~ 2 * broadcast_timeout
 -type options() ::#{
@@ -41,66 +42,25 @@
     broadcast_timeout => timeout_ms()
 }.
 
--type raft_term    () :: non_neg_integer().
--type index        () :: non_neg_integer().
--type command      () :: term().
--type log_entry    () :: {raft_term(), command()}.
--type backend_state() :: term().
-
-
-%% behaviour
--callback init(_Args) ->
-    backend_state().
-
-%% это вместо apply
--callback commit(index(), backend_state()) ->
-    backend_state().
-
--callback get_last_commit_index(backend_state()) ->
-    index().
-
-%% log
--callback get_last_log_index(backend_state()) ->
-    index().
--callback get_log_entry(index(), backend_state()) ->
-    log_entry().
-% (From, To)
--callback get_log_entries(index(), index(), backend_state()) ->
-    [log_entry()].
--callback append_log_entries(index(), [log_entry()], backend_state()) ->
-    backend_state().
+-type raft_term() :: non_neg_integer().
+-type index    () :: non_neg_integer().
+-type command  () :: term().
+-type log_entry() :: {raft_term(), command()}.
 
 
 
-%% версия без регистрации не имеет смысла (или я не прав?)
--spec start_link(mg_utils:gen_reg_name(), module(), _Args, options()) ->
+%% Версия без регистрации не имеет смысла (или я не прав? похоже, что прав, работа по пидам смысла не имеет).
+%% А как же общение по RPC? Тут похоже обратное — версия с регистрацией не нужна
+%% (но нужно всё-таки как-то зарегистрировать процесс при erl rpc).
+-spec start_link(mg_utils:gen_reg_name(), raft_server_fsm:fsm(), raft_server_storage:storage(), raft_server_rpc:rpc(), options()) ->
     mg_utils:gen_start_ret().
-start_link(RegName, Module, Args, Options) ->
-    gen_server:start_link(RegName, ?MODULE, {Module, Args, Options}, []).
+start_link(RegName, FSM, Storage, RPC, Options) ->
+    gen_server:start_link(RegName, ?MODULE, {FSM, Storage, RPC, Options}, []).
 
--spec send_command(raft_server_rpc:endpoint(), command(), mg_utils:deadline()) ->
-    ok.
-send_command(To, Command, Deadline) ->
-    case mg_utils:is_deadline_reached(Deadline) of
-        false ->
-            case gen_server:call(To, {send_command, Command}, mg_utils:deadline_to_timeout(Deadline)) of
-                ok ->
-                    ok;
-                {error, {leader_is, LeaderRef}} ->
-                    ok = timer:sleep(100), % TODO
-                    send_command(LeaderRef, Command, Deadline);
-                {error, no_leader} ->
-                    % возможно он уже избрался
-                    ok = timer:sleep(100), % TODO
-                    send_command(To, Command, Deadline);
-                {error, timeout} ->
-                    % по аналогии с gen_server
-                    exit({timeout, {?MODULE, send_command, [To, Command, Deadline]}})
-            end;
-        true ->
-            % по аналогии с gen_server
-            exit({timeout, {?MODULE, send_command, [To, Command, Deadline]}})
-    end.
+-spec get_leader(mg_utils:gen_ref()) ->
+    {ok, raft_server_rpc:endpoint()} | undefined.
+get_leader(Ref) ->
+    gen_server:call(Ref, get_leader).
 
 %%
 %% gen_server callbacks
@@ -123,12 +83,12 @@ send_command(To, Command, Deadline) ->
     % текущий терм (вообще, имхо, слово "эпоха" тут более подходящее)
     current_term  => raft_term(),
 
-    rpc_mod       => module(),
-    rpc_state     => raft_server_rpc:state(),
+    rpc           => raft_server_rpc:rpc(),
+    fsm           => raft_server_fsm:fsm(),
 
-    % модуль и состояние бэкенда (со стейт машиной и логом)
-    backend_mod   => module(),
-    backend_state => backend_state()
+    % модуль и состояние хранилища
+    storage       => raft_server_storage:storage(),
+    storage_state => raft_server_storage:state()
 }.
 
 -spec init(_) ->
@@ -144,7 +104,20 @@ init(Args) ->
     mg_utils:gen_server_handle_call_ret(state()).
 handle_call({send_command, Command}, _From, State) ->
     NewState = handle_command(Command, State),
-    {reply, ok, NewState, get_timer_timeout(NewState)}.
+    {reply, ok, NewState, get_timer_timeout(NewState)};
+handle_call(get_leader, _From, State) ->
+    Resp =
+        case State of
+            #{role := {leader, _}, options := #{self := Leader}} ->
+                {ok, Leader};
+            #{role := {follower, undefined}} ->
+                undefined;
+            #{role := {follower, Leader}} ->
+                {ok, Leader};
+            #{role := {candidate, _}} ->
+                undefined
+        end,
+    {reply, Resp, State, get_timer_timeout(State)}.
 
 -spec handle_cast(_, state()) ->
     mg_utils:gen_server_handle_cast_ret(state()).
@@ -156,15 +129,9 @@ handle_cast(_, State) ->
 handle_info(timeout, State) ->
     NewState = handle_timeout(State),
     {noreply, NewState, get_timer_timeout(NewState)};
-handle_info(Info, State0) ->
-    State2 =
-        case recv(Info, State0) of
-            {Message, State1} ->
-                handle_rpc(Message, State1);
-            invalid_data ->
-                exit(todo)
-        end,
-    {noreply, State2, get_timer_timeout(State2)}.
+handle_info({raft_server_rpc, Data}, State = #{rpc := RPC}) ->
+    NewState = handle_rpc(raft_server_rpc:recv(RPC, Data), State),
+    {noreply, NewState, get_timer_timeout(NewState)}.
 
 -spec code_change(_, state(), _) ->
     mg_utils:gen_server_code_change_ret(state()).
@@ -179,24 +146,21 @@ terminate(_, _) ->
 %%
 %% common handlers
 %%
--spec new_state({module(), _Args, options()}) ->
+-spec new_state({raft_server_fsm:fsm(), raft_server_storage:storage(), raft_server_rpc:rpc(), options()}) ->
     state().
-new_state({BackendMod, BackendArgs, Options}) ->
-    % FIXME
-    RPCMod  = raft_server_rpc_erl,
-    RPCArgs = undefined,
+new_state({FSM, Storage, RPC, Options}) ->
     State =
         #{
             options       => Options,
             timer         => undefined,
             role          => {follower, undefined},
             current_term  => 0,
-            rpc_mod       => RPCMod,
-            rpc_state     => raft_server_rpc:init(RPCMod, RPCArgs),
-            backend_mod   => BackendMod,
-            backend_state => BackendMod:init(BackendArgs)
+            rpc           => RPC,
+            fsm           => FSM,
+            storage       => Storage,
+            storage_state => raft_server_storage:init(Storage)
         },
-    become_follower(State#{current_term := get_term_from_log(backend_get_last_log_index(State), State)}).
+    become_follower(State#{current_term := get_term_from_log(last_log_index(State), State)}).
 
 -spec handle_timeout(state()) ->
     state().
@@ -212,7 +176,7 @@ handle_command(Command, State = #{role := {leader, _}, current_term := CurrentTe
     % запустить процесс репликации (а если он уже идёт?)
     % в данный момент и при получении каждого ответа проверять, не прошла ли репликация на мажорити
     % когда пройдёт — применить к автомату (в процессе подвинуть указатель последнего апплая) и ответить
-    NewState = backend_append_log_entries(backend_get_last_log_index(State), [{CurrentTerm, Command}], State),
+    NewState = append_log_entries(last_log_index(State), [{CurrentTerm, Command}], State),
     % TODO reply after commit
     {{reply, {ok, ok}}, try_send_append_entries(NewState)};
 handle_command(_, State = #{role := {candidate, _}}) ->
@@ -222,17 +186,48 @@ handle_command(_, State = #{role := {follower, undefined}}) ->
 handle_command(_, State = #{role := {follower, Leader}}) ->
     {{reply, {error, {leader_is, Leader}}}, State}.
 
+
+
 -spec handle_rpc(raft_server_rpc:message(), state()) ->
     state().
+% handle_rpc({client_request, Command, From}, State) ->
+%     case handle_rpc_client_command(Command, From, State) of
+%         {forward, To, NewState} ->
+%             send_client_request(Command, From, To, NewState);
+%         {nop, NewState} ->
+%             NewState
+%     end;
 handle_rpc(Msg = {_, _, _, _, Term}, State = #{current_term := CurrentTerm}) when Term > CurrentTerm ->
     handle_rpc(Msg, become_follower(State#{current_term := Term}));
 handle_rpc({_, _, _, _, Term}, State = #{current_term := CurrentTerm}) when Term < CurrentTerm ->
     State;
 handle_rpc({request, Type, Body, From, _}, State) ->
     {Result, NewState} = handle_rpc_request(Type, Body, From, State),
-    send_response(From, Type, Result, NewState);
+    ok = send_response(From, Type, Result, NewState),
+    NewState;
 handle_rpc({{response, Succeed}, Type, From, _}, State) ->
     handle_rpc_response(Type, From, Succeed, State).
+
+% do_client_reply_action({reply, To, Msg}, State) ->
+%     send(To, Msg, State);
+% do_client_reply_action({forward, To, Msg}, State) ->
+%     send(To, Msg, State).
+% do_client_reply_action(nop, State) ->
+%     State.
+
+% -spec handle_rpc_client_command(command(), raft_server_rpc:endpoint(), state()) ->
+%     {nop, state()} | {forward, raft_server_rpc:endpoint(), state()}.
+% handle_rpc_client_command(Command, From, State = #{role := {leader, _}, current_term := CurrentTerm}) ->
+%     % добавить результат в лог (если запись уже есть, то ответить (как это узнать? чем?))
+%     % запустить процесс репликации (а если он уже идёт?)
+%     % в данный момент и при получении каждого ответа проверять, не прошла ли репликация на мажорити
+%     % когда пройдёт — применить к автомату (в процессе подвинуть указатель последнего апплая) и ответить
+%     NewState = append_log_entries(last_log_index(State), [{CurrentTerm, Command}], State),
+%     {nop, try_send_append_entries(NewState)};
+% handle_rpc_client_command(_, _, State = #{role := {follower, Leader}}) when Leader =/= undefined ->
+%     {forward, Leader, State};
+% handle_rpc_client_command(_, _, State = #{role := _}) ->
+%     {nop, State}.
 
 -spec handle_rpc_request(raft_server_rpc:message_type(), raft_server_rpc:message_body(), raft_server_rpc:endpoint(), state()) ->
     {boolean(), state()}.
@@ -252,8 +247,8 @@ handle_rpc_request(append_entries, Body, Leader, State = #{role := {candidate, _
 handle_rpc_request(append_entries, {Prev, Entries, CommitIndex}, _, State0 = #{role := {follower, _}}) ->
     {Result, State1} = try_append_to_log(Prev, Entries, State0),
     State2 =
-        case {Result, CommitIndex > backend_get_last_log_index(State1)} of
-            {true , true} -> backend_commit(CommitIndex, State1);
+        case {Result, CommitIndex > last_log_index(State1)} of
+            {true , true} -> commit(CommitIndex, State1);
             {_    , _   } -> State1
         end,
     {Result, schedule_election_timer(State2)}.
@@ -278,8 +273,8 @@ handle_rpc_response(append_entries, From, Succeed, State = #{role := {leader, Fo
         end,
     try_send_append_entries(
         try_commit(
-            backend_get_last_log_index(State),
-            backend_get_commit_index  (State),
+            last_log_index(State),
+            commit_index  (State),
             update_leader_follower(From, NewFollowerState, State)
         )
     ).
@@ -289,9 +284,9 @@ handle_rpc_response(append_entries, From, Succeed, State = #{role := {leader, Fo
 -spec try_append_to_log(undefined | log_entry(), [log_entry()], state()) ->
     {boolean(), state()}.
 try_append_to_log({PrevTerm, PrevIndex}, Entries, State) ->
-    case (backend_get_last_log_index(State) >= PrevIndex) andalso get_term_from_log(PrevIndex, State) of
+    case (last_log_index(State) >= PrevIndex) andalso get_term_from_log(PrevIndex, State) of
         PrevTerm ->
-            {true, backend_append_log_entries(PrevIndex, Entries, State)};
+            {true, append_log_entries(PrevIndex, Entries, State)};
         _ ->
             {false, State}
     end.
@@ -320,7 +315,7 @@ try_commit(IndexN, CommitIndex, State = #{current_term := CurrentTerm}) ->
     case IndexN > CommitIndex andalso get_term_from_log(IndexN, State) =:= CurrentTerm of
         true ->
             case is_replicated(IndexN, State) of
-                true  -> backend_commit(IndexN, State);
+                true  -> commit(IndexN, State);
                 false -> try_commit(IndexN - 1, CommitIndex, State)
             end;
         false ->
@@ -354,7 +349,7 @@ new_followers_state(State = #{options := #{others := Others}}) ->
 -spec new_follower_state(state()) ->
     follower_state().
 new_follower_state(State) ->
-    {backend_get_last_log_index(State) + 1, 0, 0, 0}.
+    {last_log_index(State) + 1, 0, 0, 0}.
 
 %%
 %% role changing
@@ -386,7 +381,8 @@ become_candidate_(State) ->
                 set_role({candidate, ordsets:new()}, State)
             )
         ),
-    send_request_votes(NewState).
+    ok = send_request_votes(NewState),
+    NewState.
 
 -spec
 become_leader(state()                          ) -> state().
@@ -425,14 +421,13 @@ update_follower(Leader, State = #{role := {follower, _}}) ->
 %%
 
 -spec send_request_votes(state()) ->
-    state().
+    ok.
 send_request_votes(State = #{options := #{others := Others}}) ->
-    LastIndex = backend_get_last_log_index(State),
-    lists:foldl(
-        fun(To, StateAcc) ->
-            send_request(To, request_vote, {LastIndex, get_term_from_log(LastIndex, StateAcc)}, StateAcc)
+    LastIndex = last_log_index(State),
+    lists:foreach(
+        fun(To) ->
+            ok = send_request(To, request_vote, {LastIndex, get_term_from_log(LastIndex, State)}, State)
         end,
-        State,
         Others
     ).
 
@@ -442,20 +437,26 @@ send_request_votes(State = #{options := #{others := Others}}) ->
 -spec try_send_append_entries(state()) ->
     state().
 try_send_append_entries(State = #{role := {leader, FollowersState}}) ->
-    {NewFollowersState, NewState} = maps_mapfold(fun try_send_append_entries/3, State, FollowersState),
-    schedule_next_heartbeat_timer(update_leader(NewFollowersState, NewState)).
+    NewFollowersState =
+        maps:map(
+            fun(To, FollowerState) ->
+                try_send_one_append_entries(To, FollowerState, State)
+            end,
+            FollowersState
+        ),
+    schedule_next_heartbeat_timer(update_leader(NewFollowersState, State)).
 
--spec try_send_append_entries(raft_server_rpc:endpoint(), follower_state(), state()) ->
-    {follower_state(), state()}.
-try_send_append_entries(To, FollowerState, State = #{options := #{broadcast_timeout := Timeout}}) ->
-    LastLogIndex = backend_get_last_log_index(State),
+-spec try_send_one_append_entries(raft_server_rpc:endpoint(), follower_state(), state()) ->
+    follower_state().
+try_send_one_append_entries(To, FollowerState, State = #{options := #{broadcast_timeout := Timeout}}) ->
+    LastLogIndex = last_log_index(State),
     Now = now_ms(),
     case FollowerState of
         {NextIndex, MatchIndex, Heartbeat, _}
             when Heartbeat =< Now
             ->
-                NewState = send_append_entries(To, NextIndex, MatchIndex, State),
-                {{NextIndex, MatchIndex, Now + Timeout, Now + Timeout}, NewState};
+                ok = send_append_entries(To, NextIndex, MatchIndex, State),
+                {NextIndex, MatchIndex, Now + Timeout, Now + Timeout};
         {NextIndex, MatchIndex, _, RPCTimeout}
             when    NextIndex   =<  LastLogIndex
             andalso RPCTimeout  =<  Now
@@ -465,48 +466,38 @@ try_send_append_entries(To, FollowerState, State = #{options := #{broadcast_time
                         true  -> LastLogIndex + 1;
                         false -> NextIndex
                     end,
-                NewState = send_append_entries(To, NewNextIndex, MatchIndex, State),
-                {{NewNextIndex, MatchIndex, Now + Timeout, Now + Timeout}, NewState};
+                ok = send_append_entries(To, NewNextIndex, MatchIndex, State),
+                {NewNextIndex, MatchIndex, Now + Timeout, Now + Timeout};
         {_, _, _, _}   ->
-            {FollowerState, State}
+            FollowerState
     end.
 
 -spec send_append_entries(raft_server_rpc:endpoint(), index(), index(), state()) ->
-    state().
+    ok.
 send_append_entries(To, NextIndex, MatchIndex, State) ->
     Prev = {get_term_from_log(MatchIndex, State), MatchIndex},
-    Body = {Prev, backend_get_log_entries(MatchIndex, NextIndex, State), backend_get_commit_index(State)},
+    Body = {Prev, log_entries(MatchIndex, NextIndex, State), commit_index(State)},
     send_request(To, append_entries, Body, State).
 
 -spec send_request(raft_server_rpc:endpoint(), raft_server_rpc:message_type(), raft_server_rpc:message_body(), state()) ->
-    state().
+    ok.
 send_request(To, Type, Body, State = #{options := #{self := Self}, current_term := Term}) ->
     send(To, {request, Type, Body, Self, Term}, State).
 
 -spec send_response(raft_server_rpc:endpoint(), boolean(), raft_server_rpc:message_body(), state()) ->
-    state().
+    ok.
 send_response(To, Type, Result, State = #{options := #{self := Self}, current_term := CurrentTerm}) ->
     send(To, {{response, Result}, Type, Self, CurrentTerm}, State).
 
 -spec send(raft_server_rpc:endpoint(), raft_server_rpc:message(), state()) ->
-    state().
-send(To, Message, State = #{rpc_mod := RPCMod, rpc_state := RPCState}) ->
-    State#{rpc_state := raft_server_rpc:send(RPCMod, To, Message, RPCState)}.
-
--spec recv(_Info, state()) ->
-    {raft_server_rpc:message(), state()} | invalid_data.
-recv(Info, State = #{rpc_mod := RPCMod, rpc_state := RPCState}) ->
-    case raft_server_rpc:recv(RPCMod, Info, RPCState) of
-        {Message, NewRPCState} ->
-            {Message, State#{rpc_state := NewRPCState}};
-        invalid_data ->
-            invalid_data
-    end.
+    ok.
+send(To, Message, #{rpc := RPC}) ->
+    raft_server_rpc:send(RPC, To, Message).
 
 -spec get_term_from_log(index(), state()) ->
     term().
 get_term_from_log(Index, State) ->
-    element(1, backend_get_log_entry(Index, State)).
+    element(1, log_entry(Index, State)).
 
 %%
 %% Timers
@@ -545,38 +536,91 @@ randomize_timeout(Const) ->
     Const.
 
 %%
-%% backend
+%% interaction with storage
 %%
--spec backend_commit(index(), state()) ->
+
+-spec commit(index(), state()) ->
     state().
-backend_commit(Index, State = #{backend_mod := BackendMod, backend_state := BackendState}) ->
-    State#{backend_state := BackendMod:commit(Index, BackendState)}.
+commit(Index, State) ->
+    try_apply_commited(set_commit_index(Index, State)).
 
--spec backend_get_commit_index(state()) ->
-    index().
-backend_get_commit_index(#{backend_mod := BackendMod, backend_state := BackendState}) ->
-    BackendMod:get_last_commit_index(BackendState).
-
--spec backend_get_last_log_index(state()) ->
-    index().
-backend_get_last_log_index(#{backend_mod := BackendMod, backend_state := BackendState}) ->
-    BackendMod:get_last_log_index(BackendState).
-
--spec backend_get_log_entry(index(), state()) ->
-    [log_entry()].
-backend_get_log_entry(Index, #{backend_mod := BackendMod, backend_state := BackendState}) ->
-    BackendMod:get_log_entry(Index, BackendState).
-
--spec backend_get_log_entries(index(), index(), state()) ->
-    [log_entry()].
-backend_get_log_entries(From, To, #{backend_mod := BackendMod, backend_state := BackendState}) ->
-    BackendMod:get_log_entries(From, To, BackendState).
-
--spec backend_append_log_entries(index(), [log_entry()], state()) ->
+-spec try_apply_commited(state()) ->
     state().
-backend_append_log_entries(PrevIndex, Entries, State = #{backend_mod := BackendMod, backend_state := BackendState}) ->
-    State#{backend_state := BackendMod:append_log_entries(PrevIndex, Entries, BackendState)}.
+try_apply_commited(State) ->
+    LastApplied = last_applied(State),
+    case LastApplied < commit_index(State) of % больше он быть не может!
+        true ->
+            try_apply_commited(apply_commited(LastApplied + 1, State));
+        false ->
+            ok
+    end.
 
+-spec apply_commited(index(), state()) ->
+    state().
+apply_commited(Index, State = #{fsm := FSM, storage_state := SState}) ->
+    Command = element(2, log_entry(Index, State)),
+    NewSState = raft_server_fsm:handle_command(FSM, Command, SState),
+    set_last_applied(Index, State#{storage_state => NewSState}).
+
+-spec last_applied(state()) ->
+    index().
+last_applied(#{storage := Mod, storage_state := SState}) ->
+    set_default(raft_server_storage:get_one(Mod, main, last_applied, SState), 0).
+
+-spec set_last_applied(index(), state()) ->
+    index().
+set_last_applied(Index, #{storage := Mod, storage_state := SState}) ->
+    raft_server_storage:put(Mod, main, [{last_applied, Index}], SState).
+
+-spec commit_index(state()) ->
+    index().
+commit_index(#{storage := Mod, storage_state := SState}) ->
+    set_default(raft_server_storage:get_one(Mod, main, commit_index, SState), 0).
+
+-spec set_commit_index(index(), state()) ->
+    index().
+set_commit_index(Index, #{storage := Mod, storage_state := SState}) ->
+    raft_server_storage:put(Mod, main, [{commit_index, Index}], SState).
+
+-spec last_log_index(state()) ->
+    index().
+last_log_index(#{storage := Mod, storage_state := SState}) ->
+    set_default(raft_server_storage:get_one(Mod, main, last_log_index, SState), 0).
+
+-spec set_last_log_index(index(), state()) ->
+    state().
+set_last_log_index(Index, State = #{storage := Mod, storage_state := SState}) ->
+    State#{storage_state => raft_server_storage:put(Mod, main, [{last_log_index, Index}], SState)}.
+
+-spec try_set_last_log_index(index(), state()) ->
+    state().
+try_set_last_log_index(Index, State) ->
+    set_last_log_index(erlang:max(Index, last_log_index(State)), State).
+
+-spec log_entry(index(), state()) ->
+    log_entry().
+log_entry(Index, #{storage := Mod, storage_state := SState}) ->
+    set_default(raft_server_storage:get_one(Mod, log, Index, SState), {0, undefined}).
+
+-spec log_entries(index(), index(), state()) ->
+    [log_entry()].
+log_entries(From, To, #{storage := Mod, storage_state := SState}) ->
+    raft_server_storage:get(Mod, log, lists:seq(From, To), SState).
+
+-spec append_log_entries(index(), [log_entry()], state()) ->
+    state().
+append_log_entries(PrevIndex, Entries, State = #{storage := Mod, storage_state := SState}) ->
+    LastIndex = PrevIndex + erlang:length(Entries),
+    Values    = lists:zip(lists:seq(PrevIndex + 1, LastIndex), Entries),
+    NewSState = raft_server_storage:put(Mod, log, Values, SState),
+    try_set_last_log_index(LastIndex, State#{storage_state := NewSState}).
+
+-spec set_default(undefined | Value, Value) ->
+    Value.
+set_default(undefined, Default) ->
+    Default;
+set_default(Value, _) ->
+    Value.
 
 %%
 %% utils
@@ -591,17 +635,3 @@ lists_unzip4(List) ->
         {[], [], [], []},
         List
     ).
-
--spec maps_mapfold(fun((K, V, Acc) -> {V1, Acc}), Acc, #{K => V}) ->
-    {#{K => V1}, Acc}.
-maps_mapfold(F, Acc, Map) ->
-    {ListMap, NewAcc} =
-        lists:mapfoldl(
-            fun({K, V}, Acc_) ->
-                {NewV, NewAcc_} = F(K, V, Acc_),
-                {{K, NewV}, NewAcc_}
-            end,
-            Acc,
-            maps:to_list(Map)
-        ),
-    {maps:from_list(ListMap), NewAcc}.
