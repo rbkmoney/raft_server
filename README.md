@@ -1,2 +1,2 @@
-# raft_server
+# raft
 Erlang OTP style server based on raft protocol

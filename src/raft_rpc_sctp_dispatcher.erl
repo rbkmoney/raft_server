@@ -1,6 +1,9 @@
--module(raft_server_rpc_sctp_dispatcher).
+-module(raft_rpc_sctp_dispatcher).
 
 %% API
+-export_type([options /0]).
+-export_type([peer    /0]).
+-export_type([endpoint/0]).
 -export([start_link/2]).
 -export([send      /3]).
 
@@ -26,7 +29,7 @@
 start_link(RegName, Options) ->
     gen_server:start_link(RegName, ?MODULE, Options, []).
 
--spec send(mg_utils:gen_ref(), endpoint(), raft_server_rpc:message()) ->
+-spec send(mg_utils:gen_ref(), endpoint(), raft_rpc:message()) ->
     ok.
 send(Ref, To, Message) ->
     % TODO возможена перегрузка!!!
@@ -37,7 +40,7 @@ send(Ref, To, Message) ->
 %%
 -type association() ::
       {connected, association_connected()}
-    | {connecting, Buffer::[{mg_utils:gen_ref(), raft_server_rpc:message()}]}
+    | {connecting, Buffer::#{mg_utils:gen_ref() => raft_rpc:message()}}
     |  disconnected
 .
 -type association_connected() :: gen_sctp:assoc_id().
@@ -161,7 +164,7 @@ handle_association_event(Association, {_, #sctp_assoc_change{assoc_id = AssocID,
     end;
 handle_association_event(Association = {connected, _}, {_, Data}, _) ->
     {Ref, Message} = erlang:binary_to_term(Data),
-    ok = mg_utils:gen_send(Ref, {raft_server_rpc, Message}),
+    _ = (catch mg_utils:gen_send(Ref, {raft_rpc, Message})),
     Association.
 
 %%
@@ -182,12 +185,12 @@ association_connect({IP, Port}, #{socket := Socket}) ->
     ok = gen_sctp:connect_init(Socket, IP, Port, [], 1000), % TODO specify
     {connecting, #{}}.
 
--spec append_to_connecting_buffer({mg_utils:gen_ref(), raft_server_rpc:message()}, association()) ->
+-spec append_to_connecting_buffer({mg_utils:gen_ref(), raft_rpc:message()}, association()) ->
     association().
 append_to_connecting_buffer({To, Message}, {connecting, Buffer}) ->
     {connecting, Buffer#{To => Message}}.
 
--spec do_send_all([{mg_utils:gen_ref(), raft_server_rpc:message()}], association(), state()) ->
+-spec do_send_all([{mg_utils:gen_ref(), raft_rpc:message()}], association(), state()) ->
     ok.
 do_send_all(Messages, Association, State) ->
     ok = lists:foreach(
@@ -197,7 +200,7 @@ do_send_all(Messages, Association, State) ->
             lists:reverse(Messages)
         ).
 
--spec do_send([{mg_utils:gen_ref(), raft_server_rpc:message()}], association(), state()) ->
+-spec do_send({mg_utils:gen_ref(), raft_rpc:message()}, association(), state()) ->
     ok.
 do_send({Ref, Message}, {connected, Association}, #{socket := Socket}) ->
     case gen_sctp:send(Socket, Association, 0, erlang:term_to_binary({Ref, Message})) of

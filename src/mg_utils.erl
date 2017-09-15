@@ -59,7 +59,7 @@
 -export([stop_wait_all/3]).
 -export([stop_wait    /3]).
 
--export([concatenate_namespaces/2]).
+-export([lists_random/1]).
 
 %%
 %% API
@@ -356,7 +356,7 @@ stop_wait(Pid, Reason, Timeout) ->
     process_flag(trap_exit, OldTrap),
     R.
 
--spec concatenate_namespaces(mg:ns(), mg:ns()) ->
-    mg:ns().
-concatenate_namespaces(NamespaceA, NamespaceB) ->
-    <<NamespaceA/binary, "_", NamespaceB/binary>>.
+-spec lists_random(list(T)) ->
+    T.
+lists_random(List) ->
+    lists:nth(rand:uniform(length(List)), List).
