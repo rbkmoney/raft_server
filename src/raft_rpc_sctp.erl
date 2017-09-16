@@ -31,6 +31,11 @@ start_link(RegName, Options) ->
 
 -spec send({peer(), mg_utils:gen_ref()}, endpoint(), raft_rpc:message()) ->
     ok.
+send({SelfPeer, _}, {ToPeer, Ref}, Message) when SelfPeer =:= ToPeer ->
+    % чтобы не слать локальный трафик через сеть
+    % при этом происходит очень странный затуп на 3 секунды O_O
+    _ = (catch mg_utils:gen_send(Ref, {raft_rpc, Message})),
+    ok;
 send({_, DispatcherRef}, To, Message) ->
     ok = raft_rpc_sctp_dispatcher:send(DispatcherRef, To, Message).
 
