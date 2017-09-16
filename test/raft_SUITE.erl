@@ -68,12 +68,11 @@ test_workflow() ->
         start_rpc_dispatchers,
         start_cluster,
         election,
+        test_write_read,
+        reelection,
+        test_write_read,
+        sleep,
         test_write_read
-        % reelection
-        % test_write_read,
-        % test_write_read,
-        % sleep,
-        % test_write_read
     ].
 
 %%
@@ -84,7 +83,9 @@ test_workflow() ->
 init_per_suite(C) ->
     {ok, Apps} = application:ensure_all_started(raft),
 
-    % dbg:tracer(), dbg:p(all, c),
+    dbg:tracer(), dbg:p(all, c),
+    dbg:tpl({?MODULE, retry_strategy, '_'}, x),
+
     [
           {cluster, [a, b, c]}
         , {apps, Apps}
@@ -308,29 +309,47 @@ sctp_name_to_port(e     ) -> 5.
 -spec write_value(rpc_config(), cluster_config(), term()) ->
     ok.
 write_value(RPCConfig, ClusterConfig, Value) ->
-    RPC = rpc_mod_opts(RPCConfig, a),
     Cluster = cluster(RPCConfig, ClusterConfig),
-    ok = raft:send_sync_command(RPC, Cluster, {write_value, Value, raft_rpc:self(RPC)}),
+    write_value_(rpc_mod_opts(RPCConfig, a), Cluster, Cluster, Value).
+
+-spec write_value_(raft_rpc:rpc(), [raft_rpc:endpoint()], [raft_rpc:endpoint()], term()) ->
+    ok.
+write_value_(_, [], [], _) ->
+    exit(empty_cluster);
+write_value_(RPC, [], AllCluster, Value) ->
+    write_value_(RPC, AllCluster, AllCluster, Value);
+write_value_(RPC, Cluster, AllCluster, Value) ->
+    To = raft_rpc:get_nearest(RPC, Cluster),
+    ok = raft:send_sync_command(RPC, To, {write_value, Value, raft_rpc:self(RPC)}),
     case raft:recv_response_command(RPC, 300) of
         {ok, ok} -> ok;
-        timeout  -> write_value(RPCConfig, ClusterConfig, Value)
+        timeout  -> write_value_(RPC, Cluster -- [To], AllCluster, Value)
     end.
 
 
 -spec sync_read_value(rpc_config(), cluster_config()) ->
-    raft_rpc:endpoint().
+    term().
 sync_read_value(RPCConfig, ClusterConfig) ->
-    RPC = rpc_mod_opts(RPCConfig, a),
     Cluster = cluster(RPCConfig, ClusterConfig),
-    ok = raft:send_sync_command(RPC, Cluster, {read_value, raft_rpc:self(RPC)}),
+    sync_read_value_(rpc_mod_opts(RPCConfig, a), Cluster, Cluster).
+
+-spec sync_read_value_(raft_rpc:rpc(), [raft_rpc:endpoint()], [raft_rpc:endpoint()]) ->
+    term().
+sync_read_value_(_, [], []) ->
+    exit(empty_cluster);
+sync_read_value_(RPC, [], AllCluster) ->
+    sync_read_value_(RPC, AllCluster, AllCluster);
+sync_read_value_(RPC, Cluster, AllCluster) ->
+    To = raft_rpc:get_nearest(RPC, Cluster),
+    ok = raft:send_sync_command(RPC, To, {read_value, raft_rpc:self(RPC)}),
     case raft:recv_response_command(RPC, 300) of
         {ok, Value} -> Value;
-        timeout     -> sync_read_value(RPCConfig, ClusterConfig)
+        timeout  -> sync_read_value_(RPC, Cluster -- [To], AllCluster)
     end.
 
 % пока не нужно
 % -spec async_read_value(rpc_config(), cluster_config()) ->
-%     raft_rpc:endpoint().
+%     term().
 % async_read_value(RPCConfig, ClusterConfig) ->
 %     RPC = rpc_mod_opts(RPCConfig, a),
 %     Cluster = cluster(RPCConfig, ClusterConfig),
@@ -343,12 +362,21 @@ sync_read_value(RPCConfig, ClusterConfig) ->
 -spec get_leader(rpc_config(), cluster_config()) ->
     raft_rpc:endpoint().
 get_leader(RPCConfig, ClusterConfig) ->
-    RPC = rpc_mod_opts(RPCConfig, a),
     Cluster = cluster(RPCConfig, ClusterConfig),
-    ok = raft:send_sync_command(RPC, Cluster, {get_leader, raft_rpc:self(RPC)}),
+    get_leader_(rpc_mod_opts(RPCConfig, a), Cluster, Cluster).
+
+-spec get_leader_(raft_rpc:rpc(), [raft_rpc:endpoint()], [raft_rpc:endpoint()]) ->
+    raft_rpc:endpoint().
+get_leader_(_, [], []) ->
+    exit(empty_cluster);
+get_leader_(RPC, [], AllCluster) ->
+    get_leader_(RPC, AllCluster, AllCluster);
+get_leader_(RPC, Cluster, AllCluster) ->
+    To = raft_rpc:get_nearest(RPC, Cluster),
+    ok = raft:send_sync_command(RPC, To, {get_leader, raft_rpc:self(RPC)}),
     case raft:recv_response_command(RPC, 300) of
         {ok, Leader} -> Leader;
-        timeout      -> get_leader(RPCConfig, ClusterConfig)
+        timeout      -> get_leader_(RPC, Cluster -- [To], AllCluster)
     end.
 
 -spec kill_leader(rpc_config(), cluster_config()) ->
@@ -389,19 +417,25 @@ handle_sync_command(_, {write_value, Value, From}, #{rpc := RPC, storage := #{st
 %%
 %% logger
 %%
+%% хочется больше эвентов в seq_dia и чтобы они были в одном файле
+%%  - название теста
+%%  - создание/удаление элементов
+%%  - шедулинг таймера
+
+% рендер http://www.plantuml.com/plantuml/uml/
 -spec log(_, raft_logger:event(), raft:state(), raft:state()) ->
     ok.
 log(_, timeout, StateBefore, StateAfter) ->
-    io:format("->~s : timeout~n~s", [raft:format_id(StateBefore), format_state_transition(StateBefore, StateAfter)]);
+    io:format("->\"~s\" : timeout~n~s", [raft:format_id(StateBefore), format_state_transition(StateBefore, StateAfter)]);
 log(_, {incoming_message, Message = {internal, {_, _, _, From, _}}}, StateBefore, StateAfter) ->
-    io:format("~s->~s : ~s~n~s",
+    io:format("\"~s\"->\"~s\" : ~s~n~s",
         [raft_rpc:format_endpoint(From), raft:format_id(StateBefore), raft_rpc:format_message(Message), format_state_transition(StateBefore, StateAfter)]);
 log(_, {incoming_message, Message}, StateBefore, StateAfter) ->
-    io:format("->~s : ~s~n~s",
+    io:format("->\"~s\" : ~s~n~s",
         [raft:format_id(StateBefore), raft_rpc:format_message(Message), format_state_transition(StateBefore, StateAfter)]).
 
 -spec format_state_transition(raft:state(), raft:state()) ->
     ok.
 format_state_transition(StateBefore, StateAfter) ->
-    io_lib:format("note left of ~s~n\t~s~n\t~s~nend note",
+    io_lib:format("note left of \"~s\"~n\t~s~n\t~s~nend note",
         [raft:format_id(StateBefore), raft:format_state(StateBefore), raft:format_state(StateAfter)]).

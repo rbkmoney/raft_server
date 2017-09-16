@@ -6,15 +6,20 @@
 %%%  - с третьей сделать наиболее обобщённо и гибко
 %%%
 %%% TODO:
-%%%  - RPC на command и проксирование его (и откуда вернётся ответ туда и посылается следующий запрос)
 %%%  - идемпотентость команд
-%%%  - убрать gen_server
-%%%  - handle info + timeout
+%%%  - семантика gen_server и более удобная обработка команд
+%%%  - убрать gen_server и переделать на proc_lib
+%%%  - компактизация стейта
+%%%  - msgpack для сериализации
+%%%  - добавить генерацию seq диаграм в тесты
 %%%  -
 %%%
-%%% Вопросы:
-%%%  - нужен ли тут дедлайн или его перенести на уровень дальше
+%%% Проблемы:
+%%%  - при избрании посылает всем остальным весь лог даже если это не нужно
+%%%  - при коммите не посылает обновление commit_index
+%%%  - в кластере из пяти элементов, при после 2х reelection странно падают тесты
 %%%  -
+%%%
 -module(raft).
 
 %% API
@@ -98,15 +103,15 @@ start_link(RegName, Handler, Storage, RPC, Logger, Options) ->
     gen_server:start_link(RegName, ?MODULE, {Handler, Storage, RPC, Logger, Options}, []).
 
 %% TODO sessions
--spec send_sync_command(raft_rpc:rpc(), [raft_rpc:endpoint()], raft_storage:command()) ->
+-spec send_sync_command(raft_rpc:rpc(), raft_rpc:endpoint(), raft_storage:command()) ->
     ok.
-send_sync_command(RPC, Cluster, Command) ->
-    raft_rpc:send(RPC, raft_rpc:get_nearest(RPC, Cluster), {external, {sync_command, Command}}).
+send_sync_command(RPC, To, Command) ->
+    raft_rpc:send(RPC, To, {external, {sync_command, Command}}).
 
--spec send_async_command(raft_rpc:rpc(), [raft_rpc:endpoint()], raft_storage:command()) ->
+-spec send_async_command(raft_rpc:rpc(), raft_rpc:endpoint(), raft_storage:command()) ->
     ok.
-send_async_command(RPC, Cluster, Command) ->
-    raft_rpc:send(RPC, raft_rpc:get_nearest(RPC, Cluster), {external, {async_command, Command}}).
+send_async_command(RPC, To, Command) ->
+    raft_rpc:send(RPC, To, {external, {async_command, Command}}).
 
 -spec send_response_command(raft_rpc:rpc(), raft_rpc:endpoint(), command()) ->
     ok.
@@ -531,7 +536,7 @@ try_send_one_append_entries(To, FollowerState, State = #{options := #{broadcast_
     ok.
 send_append_entries(To, NextIndex, MatchIndex, State) ->
     Prev = {get_term_from_log(MatchIndex, State), MatchIndex},
-    Body = {Prev, log_entries(MatchIndex, NextIndex, State), commit_index(State)},
+    Body = {Prev, log_entries(MatchIndex + 1, NextIndex, State), commit_index(State)},
     send_int_request(To, append_entries, Body, State).
 
 -spec send_int_request(raft_rpc:endpoint(), raft_rpc:internal_message_type(), raft_rpc:message_body(), state()) ->
@@ -767,7 +772,6 @@ format_state(State = #{current_term := Term, role := Role}) ->
     Commit      = commit_index(State),
     LastApplied = last_applied(State),
     LastLog     = last_log_index(State),
-    % Log         = log_entries(erlang:max(LastLog - 1, 0), LastLog, State),
     LastLogEntry = last_log_entry(State),
     io_lib:format("~9999p ~9999p ~9999p ~9999p ~9999p ~9999p", [ext_role(Role), Term, LastLog, Commit, LastApplied, LastLogEntry]).
 
