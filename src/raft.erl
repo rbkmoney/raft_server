@@ -302,7 +302,7 @@ handle_rpc_request(append_entries, Body, Leader, State = #{role := {candidate, _
 handle_rpc_request(append_entries, {Prev, Entries, CommitIndex}, _, State0 = #{role := {follower, _}}) ->
     {Result, State1} = try_append_to_log(Prev, Entries, State0),
     State2 =
-        case {Result, CommitIndex > last_log_index(State1)} of
+        case {Result, CommitIndex =< last_log_index(State1)} of
             {true , true} -> commit(CommitIndex, State1);
             {_    , _   } -> State1
         end,
@@ -546,7 +546,7 @@ send_int_response(To, Type, Succeed, State = #{options := #{self := Self}, curre
 
 -spec send(raft_rpc:endpoint(), raft_rpc:message(), state()) ->
     ok.
-send(To, Message, State = #{rpc := RPC}) ->
+send(To, Message, #{rpc := RPC}) ->
     raft_rpc:send(RPC, To, Message).
 
 -spec get_term_from_log(index(), state()) ->
@@ -666,6 +666,11 @@ append_log_entries(PrevIndex, Entries, State = #{storage := Storage}) ->
     Values    = lists:zip(lists:seq(PrevIndex + 1, LastIndex), Entries),
     try_set_last_log_index(LastIndex, State#{storage := storage_put(log, Values, Storage)}).
 
+-spec last_log_entry(state()) ->
+    log_entry() | undefined.
+last_log_entry(State = #{storage := Storage}) ->
+    storage_get_one(log, last_log_index(State), Storage).
+
 -spec set_default(undefined | Value, Value) ->
     Value.
 set_default(undefined, Default) ->
@@ -762,8 +767,9 @@ format_state(State = #{current_term := Term, role := Role}) ->
     Commit      = commit_index(State),
     LastApplied = last_applied(State),
     LastLog     = last_log_index(State),
-    Log         = log_entries(1, LastLog, State),
-    io_lib:format("~9999p ~9999p ~9999p ~9999p ~9999p ~9999p", [ext_role(Role), Term, LastLog, Commit, LastApplied, Log]).
+    % Log         = log_entries(erlang:max(LastLog - 1, 0), LastLog, State),
+    LastLogEntry = last_log_entry(State),
+    io_lib:format("~9999p ~9999p ~9999p ~9999p ~9999p ~9999p", [ext_role(Role), Term, LastLog, Commit, LastApplied, LastLogEntry]).
 
 -spec format_id(state()) ->
     list().
