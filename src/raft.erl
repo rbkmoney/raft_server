@@ -29,11 +29,14 @@
 -export_type([storage     /0]).
 -export_type([ext_role    /0]).
 -export_type([ext_state   /0]).
--export([start_link/5]).
--export([send_sync_command /3]).
--export([send_async_command/3]).
+-export_type([state       /0]).
+-export([start_link           /6]).
+-export([send_sync_command    /3]).
+-export([send_async_command   /3]).
 -export([send_response_command/3]).
 -export([recv_response_command/2]).
+-export([format_state         /1]).
+-export([format_id            /1]).
 
 %% gen_server callbacks
 -behaviour(gen_server).
@@ -75,7 +78,6 @@
     role    => ext_role()
 }.
 
-
 %%
 %% behaviour
 %%
@@ -90,10 +92,10 @@
 %% Версия без регистрации не имеет смысла (или я не прав? похоже, что прав, работа по пидам смысла не имеет).
 %% А как же общение по RPC? Тут похоже обратное — версия с регистрацией не нужна
 %% (но нужно всё-таки как-то зарегистрировать процесс при erl rpc).
--spec start_link(mg_utils:gen_reg_name(), handler(), raft_storage:storage(), raft_rpc:rpc(), options()) ->
+-spec start_link(mg_utils:gen_reg_name(), handler(), raft_storage:storage(), raft_rpc:rpc(), raft_logger:logger(), options()) ->
     mg_utils:gen_start_ret().
-start_link(RegName, Handler, Storage, RPC, Options) ->
-    gen_server:start_link(RegName, ?MODULE, {Handler, Storage, RPC, Options}, []).
+start_link(RegName, Handler, Storage, RPC, Logger, Options) ->
+    gen_server:start_link(RegName, ?MODULE, {Handler, Storage, RPC, Logger, Options}, []).
 
 %% TODO sessions
 -spec send_sync_command(raft_rpc:rpc(), [raft_rpc:endpoint()], raft_storage:command()) ->
@@ -134,7 +136,7 @@ recv_response_command(RPC, Timeout) ->
     | {candidate, VotedFrom::ordsets:ordset(raft_rpc:endpoint())}
 .
 
--type state() :: #{
+-opaque state() :: #{
     options       => options(),
     timer         => timestamp_ms() | undefined,
 
@@ -148,7 +150,10 @@ recv_response_command(RPC, Timeout) ->
     handler       => handler(),
 
     % модуль и состояния хранилища
-    storage       => storage()
+    storage       => storage(),
+
+    % модулья для логгирования эвентов
+    logger        => raft_logger:logger()
 }.
 
 -spec init(_) ->
@@ -179,7 +184,7 @@ handle_info(timeout, State) ->
 handle_info({raft_rpc, Data}, State = #{rpc := RPC}) ->
     Message = raft_rpc:recv(RPC, Data),
     NewState = handle_rpc(Message, State),
-    ok = log_income_message(Message, State, NewState),
+    ok = log_incoming_message(Message, State, NewState),
     {noreply, NewState, get_timer_timeout(NewState)}.
 
 -spec code_change(_, state(), _) ->
@@ -195,9 +200,9 @@ terminate(_, _) ->
 %%
 %% common handlers
 %%
--spec new_state({handler(), raft_storage:storage(), raft_rpc:rpc(), options()}) ->
+-spec new_state({handler(), raft_storage:storage(), raft_rpc:rpc(), raft_logger:logger(), options()}) ->
     state().
-new_state({Handler, StorageModOpts, RPC, Options}) ->
+new_state({Handler, StorageModOpts, RPC, Logger, Options}) ->
     State =
         #{
             options       => Options,
@@ -206,7 +211,8 @@ new_state({Handler, StorageModOpts, RPC, Options}) ->
             current_term  => 0,
             rpc           => RPC,
             handler       => Handler,
-            storage       => init_storage(StorageModOpts)
+            storage       => init_storage(StorageModOpts),
+            logger        => Logger
         },
     become_follower(State#{current_term := get_term_from_log(last_log_index(State), State)}).
 
@@ -275,7 +281,7 @@ handle_internal_rpc({request, Type, Body, From, _}, State) ->
     {Result, NewState} = handle_rpc_request(Type, Body, From, State),
     ok = send_int_response(From, Type, Result, NewState),
     NewState;
-handle_internal_rpc({{response, Succeed}, Type, _, From, _}, State) ->
+handle_internal_rpc({response, Type, Succeed, From, _}, State) ->
     handle_rpc_response(Type, From, Succeed, State).
 
 -spec handle_rpc_request(raft_rpc:internal_message_type(), raft_rpc:message_body(), raft_rpc:endpoint(), state()) ->
@@ -348,7 +354,7 @@ add_vote(Vote, State = #{role := {candidate, Votes}}) ->
 -spec try_become_leader(state()) ->
     state().
 try_become_leader(State = #{role := {candidate, Votes}}) ->
-    case has_quorum(erlang:length(Votes), State) of
+    case has_quorum(erlang:length(Votes) + 1, State) of
         true ->
             become_leader(State);
         false ->
@@ -383,7 +389,7 @@ is_replicated(Index, State = #{role := {leader, FollowersState}}) ->
                 maps:values(FollowersState)
             )
         ),
-    has_quorum(NumberOfReplicas, State).
+    has_quorum(NumberOfReplicas + 1, State).
 
 -spec has_quorum(non_neg_integer(), state()) ->
     boolean().
@@ -535,13 +541,12 @@ send_int_request(To, Type, Body, State = #{options := #{self := Self}, current_t
 
 -spec send_int_response(raft_rpc:endpoint(), raft_rpc:internal_message_type(), boolean(), state()) ->
     ok.
-send_int_response(To, Type, Result, State = #{options := #{self := Self}, current_term := CurrentTerm}) ->
-    send(To, {internal, {{response, Result}, Type, undefined, Self, CurrentTerm}}, State).
+send_int_response(To, Type, Succeed, State = #{options := #{self := Self}, current_term := CurrentTerm}) ->
+    send(To, {internal, {response, Type, Succeed, Self, CurrentTerm}}, State).
 
 -spec send(raft_rpc:endpoint(), raft_rpc:message(), state()) ->
     ok.
 send(To, Message, State = #{rpc := RPC}) ->
-    ok = log_outgoing_message(Message, To, State),
     raft_rpc:send(RPC, To, Message).
 
 -spec get_term_from_log(index(), state()) ->
@@ -736,25 +741,21 @@ lists_unzip4(List) ->
     ).
 
 %%
-%% log
+%% logging
 %%
 -spec log_timeout(state(), state()) ->
     ok.
-log_timeout(StateBefore, StateAfter) ->
-    ct:pal("~s~ntimeout~n~s~n~s",
-        [format_id(StateBefore), format_state(StateBefore), format_state(StateAfter)]).
+log_timeout(StateBefore = #{logger := Logger}, StateAfter) ->
+    raft_logger:log(Logger, timeout, StateBefore, StateAfter).
 
--spec log_income_message(raft_rpc:message(), state(), state()) ->
+-spec log_incoming_message(raft_rpc:message(), state(), state()) ->
     ok.
-log_income_message(Message, StateBefore, StateAfter) ->
-    ct:pal("~s~nmessage ~s~n~s~n~s",
-        [format_id(StateBefore), format_message(Message), format_state(StateBefore), format_state(StateAfter)]).
+log_incoming_message(Message, StateBefore = #{logger := Logger}, StateAfter) ->
+    raft_logger:log(Logger, {incoming_message, Message}, StateBefore, StateAfter).
 
--spec log_outgoing_message(raft_rpc:message(), raft_rpc:endpoint(), state()) ->
-    ok.
-log_outgoing_message(Message, To, State) ->
-    ct:pal("~s~n-> ~9999p ~s~n~s", [format_id(State), To, format_message(Message), format_state(State)]).
-
+%%
+%% formatting
+%%
 -spec format_state(state()) ->
     list().
 format_state(State = #{current_term := Term, role := Role}) ->
@@ -767,19 +768,4 @@ format_state(State = #{current_term := Term, role := Role}) ->
 -spec format_id(state()) ->
     list().
 format_id(#{options := #{self := Self}}) ->
-    io_lib:format("~9999p ~9999p", [Self, self()]).
-
--spec format_message(raft_rpc:message()) ->
-    list().
-format_message(Message) ->
-    io_lib:format("~9999p", [Message]).
-
-
-% b
-% <- {internal,{request,append_entries,{{0,0},[{1,{get_leader,<0.192.0>}}],0},c,1}}
-% {follower,c} 1 0 0 0 []
-% {follower,c} 1 1 0 0 [{1,{get_leader,<0.192.0>}}]
-
-% b
-% -> a {internal,{request,append_entries,{{0,0},[{1,{get_leader,<0.192.0>}}],0},c,1}}
-% {follower,c} 1 0 0 0 []
+    raft_rpc:format_endpoint(Self).

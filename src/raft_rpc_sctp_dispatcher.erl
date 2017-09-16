@@ -162,6 +162,8 @@ handle_association_event(Association, {_, #sctp_assoc_change{assoc_id = AssocID,
             % поэтому лучше явно упасть и перезапусться
             erlang:exit({'unknown sctp_assoc_change', Association, AccocState})
     end;
+handle_association_event({connected, _}, {_, {sctp_shutdown_event, _}}, _) ->
+    association_disconnected();
 handle_association_event(Association = {connected, _}, {_, Data}, _) ->
     {Ref, Message} = erlang:binary_to_term(Data),
     _ = (catch mg_utils:gen_send(Ref, {raft_rpc, Message})),
@@ -182,7 +184,10 @@ association_disconnected() ->
 -spec association_connect(peer(), state()) ->
     association().
 association_connect({IP, Port}, #{socket := Socket}) ->
-    ok = gen_sctp:connect_init(Socket, IP, Port, [], 1000), % TODO specify
+    case gen_sctp:connect_init(Socket, IP, Port, [], 1000) of
+        ok              -> ok;
+        {error,eisconn} -> ok
+    end,
     {connecting, #{}}.
 
 -spec append_to_connecting_buffer({mg_utils:gen_ref(), raft_rpc:message()}, association()) ->

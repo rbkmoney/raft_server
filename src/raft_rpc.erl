@@ -18,6 +18,8 @@
 -export([recv           /2]).
 -export([get_nearest    /2]).
 -export([self           /1]).
+-export([format_endpoint/1]).
+-export([format_message /1]).
 
 %%
 %% API
@@ -35,17 +37,18 @@
     | response_command
 .
 -type external_message() :: {
-    _Type :: external_message_type(),
-    _Body :: message_body()
+    external_message_type(),
+    message_body()
 }.
 
 -type internal_message() :: {
-    request | {response, _Success::boolean()},
-    _Type       ::internal_message_type(),
-    _Body       ::message_body(),
-    _From       ::endpoint(),
+    internal_direction(),
+    internal_message_type(),
+    message_body(),
+    _From::endpoint(),
     _CurrentTerm
 }.
+-type internal_direction() :: request | response.
 -type internal_message_type() ::
       request_vote
     | append_entries
@@ -88,3 +91,35 @@ get_nearest(RPC, Endpoints) ->
     endpoint().
 self(RPC) ->
     mg_utils:apply_mod_opts(RPC, self, []).
+
+%% TODO callback
+-spec format_endpoint(endpoint()) ->
+    list().
+format_endpoint(Endpoint) ->
+    io_lib:format("~9999p", [Endpoint]).
+
+-spec format_message(message()) ->
+    list().
+format_message({internal, {Direction, Type, Body, From, Term}}) ->
+    io_lib:format(
+        "int:~s:~s:~9999p:~s:~p",
+        [format_int_direction(Direction), format_int_type(Type), Body, format_endpoint(From), Term]
+    );
+format_message({external, {Type, Body}}) ->
+    io_lib:format("ext:~s:~9999p", [format_ext_type(Type), Body]).
+
+-spec
+format_int_direction(internal_direction()) -> list().
+format_int_direction(request             ) -> "req";
+format_int_direction(response            ) -> "resp".
+
+-spec
+format_int_type(internal_message_type()) -> list().
+format_int_type(request_vote           ) -> "request_vote";
+format_int_type(append_entries         ) -> "append_entries".
+
+-spec
+format_ext_type(external_message_type()) -> list().
+format_ext_type(sync_command           ) -> "scmd" ;
+format_ext_type(async_command          ) -> "ascmd";
+format_ext_type(response_command       ) -> "rcmd" .

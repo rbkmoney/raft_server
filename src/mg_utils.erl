@@ -29,10 +29,6 @@
 -export([is_deadline_reached/1]).
 -export([default_deadline   /0]).
 
-%% Woody
--export_type([woody_handlers/0]).
--export_type([woody_handler /0]).
-
 %% Other
 -export_type([mod_opts/0]).
 -export_type([mod_opts/1]).
@@ -201,12 +197,6 @@ default_deadline() ->
     pos_integer().
 now_ms() ->
     erlang:system_time(1000).
-
-%%
-%% Woody
-%%
--type woody_handlers() :: [woody_handler()].
--type woody_handler () :: _.
 
 %%
 %% Other
