@@ -6,19 +6,21 @@
 %%%  - с третьей сделать наиболее обобщённо и гибко
 %%%
 %%% TODO:
-%%%  - идемпотентость команд
-%%%  - семантика gen_server и более удобная обработка команд
-%%%  - убрать gen_server и переделать на proc_lib
-%%%  - компактизация стейта
-%%%  - msgpack для сериализации
-%%%  - добавить генерацию seq диаграм в тесты
-%%%  -
-%%%
-%%% Проблемы:
-%%%  - при избрании посылает всем остальным весь лог даже если это не нужно
-%%%  - при коммите не посылает обновление commit_index
-%%%  - в кластере из пяти элементов, при после 2х reelection странно падают тесты
-%%%  -
+%%%  - обязательное:
+%%%   - фиксы проблем
+%%%   - идемпотентость команд
+%%%   - семантика gen_server и более удобная обработка команд
+%%%   - workers и супервизор
+%%%  - доработки:
+%%%   - убрать gen_server и переделать на proc_lib
+%%%   - компактизация стейта и оптимизация наливки свежего елемента группы
+%%%   - ресайз кластера
+%%%   - msgpack для сериализации
+%%%   - рефакторинг и причёсывание
+%%%  - проблемы:
+%%%   - при коммите не посылает обновление commit_index и новый лидер не пытается реплицировать и закоммитить лог
+%%%   - в кластере из пяти элементов, при после 2х reelection странно падают тесты (проблемы идемпотентности)
+%%%   -
 %%%
 -module(raft).
 
@@ -329,7 +331,7 @@ handle_rpc_response(append_entries, From, Succeed, State = #{role := {leader, Fo
             true ->
                 {NextIndex, NextIndex - 1 , Heartbeat, 0};
             false ->
-                {NextIndex - 1, MatchIndex, Heartbeat, 0}
+                {NextIndex, MatchIndex - 1, Heartbeat, 0}
         end,
     try_send_append_entries(
         try_commit(
@@ -409,7 +411,7 @@ new_followers_state(State = #{options := #{others := Others}}) ->
 -spec new_follower_state(state()) ->
     follower_state().
 new_follower_state(State) ->
-    {last_log_index(State) + 1, 0, 0, 0}.
+    {last_log_index(State) + 1, erlang:max(last_log_index(State) - 1, 0), 0, 0}.
 
 %%
 %% role changing

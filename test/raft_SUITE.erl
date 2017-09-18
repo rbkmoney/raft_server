@@ -65,13 +65,29 @@ groups() ->
     [test_name()].
 test_workflow() ->
     [
+        % TODO периодически падает из-за отсутствия идемпотентоности команд
         start_rpc_dispatchers,
+
+        % кластер стартует, выбирается лидер, проходит запись
         start_cluster,
         election,
         test_write_read,
+
+        % кластер теряет лидера, выбирается лидер, проходит запись
         reelection,
         test_write_read,
+
+        % кластер теряет ещё одного лидера, выбирается лидер, проходит запись
+        reelection,
+        test_write_read,
+
+        % кластер находится в неактивности, всё работает (может эту стадию не надо?)
         sleep,
+        test_write_read,
+
+        % кластер получает обратно всех, теряет лидера, проходит запись
+        start_cluster,
+        reelection,
         test_write_read
     ].
 
@@ -87,7 +103,8 @@ init_per_suite(C) ->
     dbg:tpl({?MODULE, retry_strategy, '_'}, x),
 
     [
-          {cluster, [a, b, c]}
+          % {cluster, [a, b, c]}
+          {cluster, [a, b, c, d, e]}
         , {apps, Apps}
         | C
     ].
@@ -106,9 +123,9 @@ init_per_group(GroupName, C) ->
             sctp_one_dispatcher   -> {sctp, one , sctp_rpc, {{127, 0, 0, 1}, 1900}};
             sctp_many_dispatchers -> {sctp, many, sctp_rpc, {{127, 0, 0, 1}, 1900}}
         end,
-    {ok, RPCSupPid} = start_rpc_sup(),
+    RPCSupPid = start_rpc_sup(),
     true = erlang:unlink(RPCSupPid),
-    {ok, SupPid} = start_raft_sup(),
+    SupPid = start_raft_sup(),
     true = erlang:unlink(SupPid),
     [{rpc, RPC} | C].
 
@@ -179,12 +196,17 @@ start_raft_sup() ->
                 type     => worker
             }
         ],
-    mg_utils_supervisor_wrapper:start_link({local, raft_sup}, Flags, ChildsSpecs).
+    mg_utils:throw_if_error(mg_utils_supervisor_wrapper:start_link({local, raft_sup}, Flags, ChildsSpecs)).
 
 -spec start_raft(rpc_config(), cluster_config (), name()) ->
     pid().
 start_raft(RPC, Cluster, Name) ->
-    mg_utils:throw_if_error(supervisor:start_child(raft_sup, [RPC, Cluster, Name])).
+    case supervisor:start_child(raft_sup, [RPC, Cluster, Name]) of
+        {ok, Pid} ->
+            Pid;
+        {error, {already_started, Pid}} ->
+            Pid
+    end.
 
 -spec start_raft_(rpc_config(), cluster_config (), name()) ->
     mg_utils:gen_start_ret().
@@ -236,7 +258,7 @@ start_rpc_sup() ->
                 type     => worker
             }
         ],
-    mg_utils_supervisor_wrapper:start_link({local, rpc_sup}, Flags, ChildsSpecs).
+    mg_utils:throw_if_error(mg_utils_supervisor_wrapper:start_link({local, rpc_sup}, Flags, ChildsSpecs)).
 
 -spec start_rpc(rpc_config(), cluster_config ()) ->
     ok.
