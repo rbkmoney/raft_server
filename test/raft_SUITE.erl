@@ -284,7 +284,7 @@ sctp_rpc_options(Mode, Peer, Name) ->
     #{
         port           => Port,
         ip             => IP,
-        socket_options => []
+        socket_options => [{reuseaddr, true}]
     }.
 
 %%

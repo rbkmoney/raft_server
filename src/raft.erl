@@ -134,9 +134,15 @@ recv_response_command(RPC, Timeout) ->
 %%
 %% gen_server callbacks
 %%
-% нужно написать как работают heartbeat
--type follower_state () :: {Next::index(), Match::index(), Heartbeat::timestamp_ms(), timestamp_ms()}.
--type followers_state() :: #{raft_rpc:endpoint() => follower_state()}.
+-record(follower_state, {
+    heartbeat    :: timestamp_ms(),
+    rpc_timeout  :: timestamp_ms(),
+    next_index   :: index(),
+    match_index  :: index(),
+    commit_index :: index()
+}).
+-type follower_state () :: #follower_state{}.
+-type followers_state() ::#{raft_rpc:endpoint() => follower_state()}.
 -type role() ::
       {leader   , followers_state()}
     | {follower , MyLeader::(raft_rpc:endpoint() | undefined)}
@@ -325,14 +331,17 @@ handle_rpc_response(request_vote, _, _, State = #{role := _}) ->
     % я уже либо лидер, либо фолловер
     State;
 handle_rpc_response(append_entries, From, Succeed, State = #{role := {leader, FollowersState}}) ->
-    {NextIndex, MatchIndex, Heartbeat, _} = maps:get(From, FollowersState),
-    NewFollowerState =
+    #follower_state{next_index = NextIndex, match_index = MatchIndex} = FollowerState = maps:get(From, FollowersState),
+    NewMatchIndex =
         case Succeed of
-            true ->
-                {NextIndex, NextIndex - 1 , Heartbeat, 0};
-            false ->
-                {NextIndex, MatchIndex - 1, Heartbeat, 0}
+            true  -> NextIndex - 1;
+            false -> MatchIndex - 1
         end,
+    NewFollowerState =
+        FollowerState#follower_state{
+            match_index = NewMatchIndex,
+            rpc_timeout = 0
+        },
     try_send_append_entries(
         try_commit(
             last_log_index(State),
@@ -377,7 +386,7 @@ try_commit(IndexN, CommitIndex, State = #{current_term := CurrentTerm}) ->
     case IndexN > CommitIndex andalso get_term_from_log(IndexN, State) =:= CurrentTerm of
         true ->
             case is_replicated(IndexN, State) of
-                true  -> commit(IndexN, State);
+                true  -> try_apply_commited(commit(IndexN, State));
                 false -> try_commit(IndexN - 1, CommitIndex, State)
             end;
         false ->
@@ -390,7 +399,7 @@ is_replicated(Index, State = #{role := {leader, FollowersState}}) ->
     NumberOfReplicas =
         erlang:length(
             lists:filter(
-                fun({_, MatchIndex, _, _}) ->
+                fun(#follower_state{match_index = MatchIndex}) ->
                     MatchIndex >= Index
                 end,
                 maps:values(FollowersState)
@@ -411,7 +420,13 @@ new_followers_state(State = #{options := #{others := Others}}) ->
 -spec new_follower_state(state()) ->
     follower_state().
 new_follower_state(State) ->
-    {last_log_index(State) + 1, erlang:max(last_log_index(State) - 1, 0), 0, 0}.
+    #follower_state{
+        heartbeat    = 0,
+        rpc_timeout  = 0,
+        next_index   = last_log_index(State) + 1,
+        match_index  = erlang:max(last_log_index(State) - 1, 0),
+        commit_index = 0
+    }.
 
 %%
 %% role changing
@@ -510,29 +525,55 @@ try_send_append_entries(State = #{role := {leader, FollowersState}}) ->
 
 -spec try_send_one_append_entries(raft_rpc:endpoint(), follower_state(), state()) ->
     follower_state().
-try_send_one_append_entries(To, FollowerState, State = #{options := #{broadcast_timeout := Timeout}}) ->
-    LastLogIndex = last_log_index(State),
-    Now = now_ms(),
-    case FollowerState of
-        {NextIndex, MatchIndex, Heartbeat, _}
-            when Heartbeat =< Now
-            ->
-                ok = send_append_entries(To, NextIndex, MatchIndex, State),
-                {NextIndex, MatchIndex, Now + Timeout, Now + Timeout};
-        {NextIndex, MatchIndex, _, RPCTimeout}
-            when    NextIndex   =<  LastLogIndex
-            andalso RPCTimeout  =<  Now
-            ->
-                NewNextIndex =
-                    case MatchIndex =:= (NextIndex - 1) of
-                        true  -> LastLogIndex + 1;
-                        false -> NextIndex
-                    end,
-                ok = send_append_entries(To, NewNextIndex, MatchIndex, State),
-                {NewNextIndex, MatchIndex, Now + Timeout, Now + Timeout};
-        {_, _, _, _}   ->
+try_send_one_append_entries(To, FollowerState, State) ->
+    case is_follower_obsolate(FollowerState, State) of
+        true ->
+            #follower_state{next_index = NextIndex, match_index = MatchIndex} =
+                NewFollowersState = update_follower_state(FollowerState, State),
+            ok = send_append_entries(To, NextIndex, MatchIndex, State),
+            NewFollowersState;
+        false ->
             FollowerState
     end.
+
+-spec is_follower_obsolate(follower_state(), state()) ->
+    boolean().
+is_follower_obsolate(FollowerState, State) ->
+    #follower_state{
+        heartbeat    = HeartbeatDate,
+        rpc_timeout  = RPCTimeoutDate,
+        next_index   = NextIndex,
+        commit_index = FollowerCommitIndex
+    } = FollowerState,
+    Now = now_ms(),
+    CommitIndex = commit_index(State),
+    LastLogIndex = last_log_index(State),
+
+           HeartbeatDate =< Now
+    orelse NextIndex =< LastLogIndex andalso RPCTimeoutDate =< Now
+    orelse FollowerCommitIndex =/= CommitIndex.
+
+-spec update_follower_state(follower_state(), state()) ->
+    follower_state().
+update_follower_state(FollowerState, State = #{options := #{broadcast_timeout := Timeout}}) ->
+    #follower_state{
+        next_index  = NextIndex,
+        match_index = MatchIndex
+    } = FollowerState,
+    Now = now_ms(),
+
+    NewNextIndex =
+        case MatchIndex =:= (NextIndex - 1) of
+            true  -> last_log_index(State) + 1;
+            false -> NextIndex
+        end,
+
+    FollowerState#follower_state{
+        next_index   = NewNextIndex,
+        commit_index = commit_index(State),
+        heartbeat    = Now + Timeout,
+        rpc_timeout  = Now + Timeout
+    }.
 
 -spec send_append_entries(raft_rpc:endpoint(), index(), index(), state()) ->
     ok.
@@ -572,7 +613,7 @@ schedule_election_timer(State = #{options := #{election_timeout := Timeout}}) ->
 -spec schedule_next_heartbeat_timer(state()) ->
     state().
 schedule_next_heartbeat_timer(State = #{role := {leader, FollowersState}}) ->
-    NextHeardbeat = lists:min(element(3, lists_unzip4(maps:values(FollowersState)))),
+    NextHeardbeat = lists:min(lists_unzip_element(#follower_state.heartbeat, maps:values(FollowersState))),
     State#{timer := NextHeardbeat}.
 
 -spec schedule_timer(timestamp_ms(), state()) ->
@@ -602,11 +643,11 @@ randomize_timeout(Const) ->
 -spec commit(index(), state()) ->
     state().
 commit(Index, State) ->
-    try_apply_commited(set_commit_index(Index, State)).
+    set_commit_index(Index, State).
 
 -spec try_apply_commited(state()) ->
     state().
-try_apply_commited(State) ->
+try_apply_commited(State = #{role := {leader, _}}) ->
     LastApplied = last_applied(State),
     case LastApplied < commit_index(State) of % больше он быть не может!
         true ->
@@ -741,14 +782,13 @@ ext_role({candidate, _     }) -> candidate.
 %%
 %% utils
 %%
--spec lists_unzip4([{A, B, C, D}]) ->
-    {[A], [B], [C], [D]}.
-lists_unzip4(List) ->
-    lists:foldr(
-        fun({A, B, C, D}, {AccA, AccB, AccC, AccD}) ->
-            {[A | AccA], [B | AccB], [C | AccC], [D | AccD]}
+-spec lists_unzip_element(pos_integer(), [tuple()]) ->
+    _.
+lists_unzip_element(N, List) ->
+    lists:map(
+        fun(Tuple) ->
+            element(N, Tuple)
         end,
-        {[], [], [], []},
         List
     ).
 
