@@ -6,6 +6,7 @@
 -export_type([type   /0]).
 -export_type([key    /0]).
 -export_type([value  /0]).
+-export_type([command/0]).
 -export_type([state  /0]).
 -export_type([storage/0]).
 -export([init   /2]).
@@ -13,9 +14,10 @@
 -export([get    /3]).
 -export([get_one/3]).
 
--type type   () :: system | log | handler.
+-type type   () :: system | log | handler | cmd_id.
 -type key    () :: term().
 -type value  () :: term().
+-type command() :: term().
 -type state  () :: term().
 -type storage() :: mg_utils:mod_opts().
 

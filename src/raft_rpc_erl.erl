@@ -2,15 +2,15 @@
 
 %% raft_rpc
 -behaviour(raft_rpc).
--export([send/3, recv/2, get_nearest/2, self/1]).
+-export([send/4, recv/2, get_nearest/2, self/1]).
 
 -type endpoint() :: mg_utils:gen_ref().
 
 %% this is a copy of gen_server:cast
--spec send(_, endpoint(), raft_rpc:message()) ->
+-spec send(_, endpoint(), endpoint(), raft_rpc:message()) ->
     ok.
-send(_, To, Message) ->
-    FullMessage = {raft_rpc, Message},
+send(_, From, To, Message) ->
+    FullMessage = {raft_rpc, From, Message},
     ok = case To of
             {global, GlobalName} ->
                 catch global:send(GlobalName, FullMessage);

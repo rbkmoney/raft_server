@@ -13,7 +13,7 @@
 
 %% raft_rpc
 -behaviour(raft_rpc).
--export([send/3, recv/2, get_nearest/2, self/1]).
+-export([send/4, recv/2, get_nearest/2, self/1]).
 
 %%
 %% API
@@ -29,15 +29,15 @@ start_link(RegName, Options) ->
 -type endpoint() :: raft_rpc_sctp_dispatcher:endpoint().
 -type peer    () :: raft_rpc_sctp_dispatcher:peer().
 
--spec send({peer(), mg_utils:gen_ref()}, endpoint(), raft_rpc:message()) ->
+-spec send({peer(), mg_utils:gen_ref()}, endpoint(), endpoint(), raft_rpc:message()) ->
     ok.
-send({SelfPeer, _}, {ToPeer, Ref}, Message) when SelfPeer =:= ToPeer ->
+send({SelfPeer, _}, From, {ToPeer, Ref}, Message) when SelfPeer =:= ToPeer ->
     % чтобы не слать локальный трафик через сеть
     % при этом происходит очень странный затуп на 3 секунды O_O
-    _ = (catch mg_utils:gen_send(Ref, {raft_rpc, Message})),
+    _ = (catch mg_utils:gen_send(Ref, {raft_rpc, From, Message})),
     ok;
-send({_, DispatcherRef}, To, Message) ->
-    ok = raft_rpc_sctp_dispatcher:send(DispatcherRef, To, Message).
+send({_, DispatcherRef}, From, To, Message) ->
+    ok = raft_rpc_sctp_dispatcher:send(DispatcherRef, From, To, Message).
 
 -spec recv({peer(), mg_utils:gen_ref()}, term()) ->
     raft_rpc:message().

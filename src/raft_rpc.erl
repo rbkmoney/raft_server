@@ -8,13 +8,14 @@
 %% API
 -export_type([rpc                  /0]).
 -export_type([endpoint             /0]).
+-export_type([request_id           /0]).
 -export_type([message              /0]).
 -export_type([external_message     /0]).
 -export_type([internal_message     /0]).
 -export_type([external_message_type/0]).
 -export_type([internal_message_type/0]).
 -export_type([message_body         /0]).
--export([send           /3]).
+-export([send           /4]).
 -export([recv           /2]).
 -export([get_nearest    /2]).
 -export([self           /1]).
@@ -26,9 +27,10 @@
 %%
 -type rpc() :: mg_utils:mod_opts().
 -type endpoint() :: term().
+-type request_id() :: term(). % mb integer?
 -type message() ::
       {internal, internal_message()}
-    | {external, external_message()}
+    | {external, ID::request_id(), external_message()}
 .
 
 -type external_message_type() ::
@@ -45,7 +47,6 @@
     internal_direction(),
     internal_message_type(),
     message_body(),
-    _From::endpoint(),
     _CurrentTerm
 }.
 -type internal_direction() :: request | response.
@@ -58,7 +59,7 @@
 
 %%
 
--callback send(_, endpoint(), message()) ->
+-callback send(_, endpoint(), endpoint(), message()) ->
     ok.
 
 -callback recv(_, _Data) ->
@@ -72,15 +73,15 @@
 
 %%
 
--spec send(mg_utils:mod_opts(), endpoint(), message()) ->
+-spec send(mg_utils:mod_opts(), endpoint(), endpoint(), message()) ->
     ok.
-send(RPC, To, Message) ->
-    mg_utils:apply_mod_opts(RPC, send, [To, Message]).
+send(RPC, From, To, Message) ->
+    mg_utils:apply_mod_opts(RPC, send, [From, To, Message]).
 
 -spec recv(mg_utils:mod_opts(), _) ->
     message().
-recv(RPC, Info) ->
-    mg_utils:apply_mod_opts(RPC, recv, [Info]).
+recv(RPC, Data) ->
+    mg_utils:apply_mod_opts(RPC, recv, [Data]).
 
 -spec get_nearest(mg_utils:mod_opts(), [endpoint()]) ->
     endpoint().
@@ -100,13 +101,13 @@ format_endpoint(Endpoint) ->
 
 -spec format_message(message()) ->
     list().
-format_message({internal, {Direction, Type, Body, From, Term}}) ->
+format_message({internal, {Direction, Type, Body, Term}}) ->
     io_lib:format(
-        "int:~s:~s:~9999p:~s:~p",
-        [format_int_direction(Direction), format_int_type(Type), Body, format_endpoint(From), Term]
+        "int:~s:~s:~9999p:~p",
+        [format_int_direction(Direction), format_int_type(Type), Body, Term]
     );
-format_message({external, {Type, Body}}) ->
-    io_lib:format("ext:~s:~9999p", [format_ext_type(Type), Body]).
+format_message({external, ID, {Type, Body}}) ->
+    io_lib:format("ext:~p:~s:~9999p", [ID, format_ext_type(Type), Body]).
 
 -spec
 format_int_direction(internal_direction()) -> list().

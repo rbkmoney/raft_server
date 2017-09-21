@@ -7,7 +7,7 @@
 -type logger() :: mg_utils:mod_opts().
 -type event() ::
       timeout
-    | {incoming_message, raft_rpc:message()}.
+    | {incoming_message, raft_rpc:endpoint(), raft_rpc:message()}.
 
 -callback log(_, event(), Before::raft:state(), After::raft:state()) ->
     ok.
