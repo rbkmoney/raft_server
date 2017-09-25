@@ -19,9 +19,9 @@
 -export([sleep                /1]).
 
 %% raft
--behaviour(raft).
--export([handle_async_command/5]).
--export([handle_sync_command/5]).
+-behaviour(raft_server).
+-export([handle_leader_sync_call  /5]).
+-export([handle_follower_sync_call/4]).
 
 %% raft_logger
 -behaviour(raft_logger).
@@ -212,11 +212,8 @@ start_raft(RPC, Cluster, Name) ->
 -spec start_raft_(rpc_config(), cluster_config (), name()) ->
     mg_utils:gen_start_ret().
 start_raft_(RPC, Cluster, Name) ->
-    raft:start_link(
+    raft_server:start_link(
         {local, Name},
-        ?MODULE,
-        raft_storage_memory,
-        rpc_mod_opts(RPC, Name),
         ?MODULE,
         raft_options(RPC, Cluster, Name)
     ).
@@ -227,10 +224,14 @@ raft_options(RPC, Cluster, Self) ->
     {ElectionTimeout, BroadcastTimeout} = raft_timeouts(RPC),
     #{
         self              => rpc_endpoint(RPC, Self),
-        others            => cluster(RPC, Cluster -- [Self]),
+        cluster           => cluster(RPC, Cluster),
         election_timeout  => ElectionTimeout,
-        broadcast_timeout => BroadcastTimeout
+        broadcast_timeout => BroadcastTimeout,
+        storage           => raft_storage_memory,
+        rpc               => rpc_mod_opts(RPC, Self),
+        logger            => ?MODULE
     }.
+
 
 -spec cluster(rpc_config(), cluster_config ()) ->
     [raft_rpc:endpoint()].
@@ -327,68 +328,22 @@ sctp_name_to_port(d     ) -> 4;
 sctp_name_to_port(e     ) -> 5.
 
 %%
-%% raft_fsm
+%% raft_server
 %%
 -spec write_value(rpc_config(), cluster_config(), term()) ->
     ok.
 write_value(RPCConfig, ClusterConfig, Value) ->
-    Cluster = cluster(RPCConfig, ClusterConfig),
-    write_value_(rpc_mod_opts(RPCConfig, a), new_request_id(), Cluster, Cluster, Value).
-
--spec write_value_(raft_rpc:rpc(), raft_rpc:request_id(), [raft_rpc:endpoint()], [raft_rpc:endpoint()], term()) ->
-    ok.
-write_value_(_, _, [], [], _) ->
-    exit(empty_cluster);
-write_value_(RPC, ID, [], AllCluster, Value) ->
-    write_value_(RPC, ID, AllCluster, AllCluster, Value);
-write_value_(RPC, ID, Cluster, AllCluster, Value) ->
-    To = raft_rpc:get_nearest(RPC, Cluster),
-    ok = raft:send_sync_command(RPC, raft_rpc:self(RPC), To, ID, {write_value, Value}),
-    case raft:recv_response_command(RPC, ID, 300) of
-        {ok, _, ok} -> ok;
-        timeout -> write_value_(RPC, ID, Cluster -- [To], AllCluster, Value)
-    end.
-
+    raft_server_call(RPCConfig, ClusterConfig, {write_value, Value}).
 
 -spec sync_read_value(rpc_config(), cluster_config()) ->
     term().
 sync_read_value(RPCConfig, ClusterConfig) ->
-    Cluster = cluster(RPCConfig, ClusterConfig),
-    sync_read_value_(rpc_mod_opts(RPCConfig, a), new_request_id(), Cluster, Cluster).
-
--spec sync_read_value_(raft_rpc:rpc(), raft_rpc:request_id(), [raft_rpc:endpoint()], [raft_rpc:endpoint()]) ->
-    term().
-sync_read_value_(_, _, [], []) ->
-    exit(empty_cluster);
-sync_read_value_(RPC, ID, [], AllCluster) ->
-    sync_read_value_(RPC, ID, AllCluster, AllCluster);
-sync_read_value_(RPC, ID, Cluster, AllCluster) ->
-    To = raft_rpc:get_nearest(RPC, Cluster),
-    ok = raft:send_sync_command(RPC, raft_rpc:self(RPC), To, ID, read_value),
-    case raft:recv_response_command(RPC, ID, 300) of
-        {ok, _, Value} -> Value;
-        timeout -> sync_read_value_(RPC, ID, Cluster -- [To], AllCluster)
-    end.
+    raft_server_call(RPCConfig, ClusterConfig, read_value).
 
 -spec get_leader(rpc_config(), cluster_config()) ->
     raft_rpc:endpoint().
 get_leader(RPCConfig, ClusterConfig) ->
-    Cluster = cluster(RPCConfig, ClusterConfig),
-    get_leader_(rpc_mod_opts(RPCConfig, a), new_request_id(), Cluster, Cluster).
-
--spec get_leader_(raft_rpc:rpc(), raft_rpc:request_id(), [raft_rpc:endpoint()], [raft_rpc:endpoint()]) ->
-    raft_rpc:endpoint().
-get_leader_(_, _, [], []) ->
-    exit(empty_cluster);
-get_leader_(RPC, ID, [], AllCluster) ->
-    get_leader_(RPC, ID, AllCluster, AllCluster);
-get_leader_(RPC, ID, Cluster, AllCluster) ->
-    To = raft_rpc:get_nearest(RPC, Cluster),
-    ok = raft:send_sync_command(RPC, raft_rpc:self(RPC), To, ID, get_leader),
-    case raft:recv_response_command(RPC, ID, 300) of
-        {ok, _, Leader} -> Leader;
-        timeout         -> get_leader_(RPC, ID, Cluster -- [To], AllCluster)
-    end.
+    raft_server_call(RPCConfig, ClusterConfig, get_leader).
 
 -spec kill_leader(rpc_config(), cluster_config()) ->
     ok.
@@ -401,34 +356,34 @@ kill_leader(RPCConfig, ClusterConfig) ->
 new_request_id() ->
     rand:uniform(1000000).
 
+-spec raft_server_call(rpc_config(), cluster_config(), _Call) ->
+    _.
+raft_server_call(RPCConfig, ClusterConfig, Call) ->
+    raft_server:sync_call(
+        rpc_mod_opts(RPCConfig, a),
+        cluster(RPCConfig, ClusterConfig),
+        new_request_id(),
+        Call,
+        genlib_retry:linear(10, 100)
+    ).
+
 %%
 
--spec handle_async_command(_, raft_rpc:endpoint(), raft_rpc:request_id(), raft_storage:command(), raft:ext_state()) ->
-    raft_storage:state().
-handle_async_command(_, From, ID, read_value, #{rpc := RPC, storage := #{storage := Storage, handler := State}}) ->
-    raft:send_response_command(RPC, raft_rpc:self(RPC), From, ID, raft_storage:get_one(Storage, value, State)).
+-spec handle_leader_sync_call(_, raft_rpc:endpoint() | undefined, raft_rpc:request_id(), _Call, _) ->
+    {raft_server:reply_action(), _}.
+handle_leader_sync_call(_, _, _, get_leader, State) ->
+    {{reply, erlang:self()}, State};
+handle_leader_sync_call(_, _, _, read_value, State) ->
+    {{reply, State}, State};
+handle_leader_sync_call(_, _, _, {write_value, Value}, _) ->
+    {{reply, ok}, Value}.
 
--spec handle_sync_command(_, raft_rpc:endpoint() | undefined, raft_rpc:request_id(), _, raft:ext_state()) ->
-    ok.
-handle_sync_command(_, From, ID, get_leader, #{rpc := RPC, storage := #{handler := State}, role := Role}) ->
-    case Role of
-        leader -> ok = raft:send_response_command(RPC, raft_rpc:self(RPC), From, ID, erlang:self());
-        _      -> ok
-    end,
-    State;
-handle_sync_command(_, From, ID, read_value, #{rpc := RPC, storage := #{storage := Storage, handler := State}, role := Role}) ->
-    case Role of
-        leader -> ok = raft:send_response_command(RPC, raft_rpc:self(RPC), From, ID, raft_storage:get_one(Storage, value, State));
-        _      -> ok
-    end,
-    State;
-handle_sync_command(_, From, ID, {write_value, Value}, #{rpc := RPC, storage := #{storage := Storage, handler := State}, role := Role}) ->
-    NewState = raft_storage:put(Storage, [{value, Value}], State),
-    case Role of
-        leader -> ok = raft:send_response_command(RPC, raft_rpc:self(RPC), From, ID, ok);
-        _      -> ok
-    end,
-    NewState.
+-spec handle_follower_sync_call(_, raft_rpc:request_id(), _Call, _) ->
+    _.
+handle_follower_sync_call(_, _, {write_value, Value}, _) ->
+    Value;
+handle_follower_sync_call(_, _, _, State) ->
+    State.
 
 %%
 %% logger

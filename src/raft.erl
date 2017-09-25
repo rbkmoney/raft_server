@@ -7,10 +7,11 @@
 %%%
 %%% TODO:
 %%%  - обязательное:
-%%%   - семантика gen_server и более удобная обработка команд
 %%%   - workers и супервизор
 %%%  - доработки:
+%%%   - сделать регистрацию в RPC
 %%%   - убрать gen_server и переделать на proc_lib
+%%%   - timeout на хендлер
 %%%   - компактизация стейта и оптимизация наливки свежего елемента группы
 %%%   - ресайз кластера
 %%%   - msgpack для сериализации
@@ -34,7 +35,7 @@
 -export_type([ext_role    /0]).
 -export_type([ext_state   /0]).
 -export_type([state       /0]).
--export([start_link           /6]).
+-export([start_link           /3]).
 -export([send_sync_command    /5]).
 -export([send_async_command   /5]).
 -export([send_response_command/5]).
@@ -52,14 +53,25 @@
 -type timeout_ms  () :: non_neg_integer().
 -type timestamp_ms() :: non_neg_integer().
 
-% ниже важный коментарий!
-% election_timeout << broadcast_timeout << mean_time_between_failures
-% election_timeout ~ 2 * broadcast_timeout
--type options() ::#{
+-type options() :: #{
+    % состав рафт-группы
     self              => raft_rpc:endpoint(),
-    others            => ordsets:ordset(raft_rpc:endpoint()),
+    cluster           => ordsets:ordset(raft_rpc:endpoint()),
+
+    % таймауты raft протокола (это важная настройка!)
+    % election_timeout << broadcast_timeout << mean_time_between_failures
+    % election_timeout ~ 2 * broadcast_timeout
     election_timeout  => timeout_ms() | {From::timeout_ms(), To::timeout_ms()},
-    broadcast_timeout => timeout_ms()
+    broadcast_timeout => timeout_ms(),
+
+    % хранилище состояния (TODO нужно переделать)
+    storage           => raft_storage:storage(),
+
+    % протокол общения между серверами
+    rpc               => raft_rpc:rpc(),
+
+    % логгирование эвентов
+    logger            => raft_logger:logger()
 }.
 
 -type raft_term() :: non_neg_integer().
@@ -69,7 +81,6 @@
 -type handler  () :: mg_utils:mod_opts().
 
 -type storage() :: #{
-    storage => raft_storage:storage(),
     system  => raft_storage:state(),
     handler => raft_storage:state(),
     log     => raft_storage:state(),
@@ -77,7 +88,6 @@
 }.
 -type ext_role() :: leader | {follower, undefined | raft_rpc:endpoint()} | candidate.
 -type ext_state() :: #{
-    rpc     => raft_rpc:rpc(),
     options => options(),
     storage => storage(),
     role    => ext_role()
@@ -97,10 +107,10 @@
 %% Версия без регистрации не имеет смысла (или я не прав? похоже, что прав, работа по пидам смысла не имеет).
 %% А как же общение по RPC? Тут похоже обратное — версия с регистрацией не нужна
 %% (но нужно всё-таки как-то зарегистрировать процесс при erl rpc).
--spec start_link(mg_utils:gen_reg_name(), handler(), raft_storage:storage(), raft_rpc:rpc(), raft_logger:logger(), options()) ->
+-spec start_link(mg_utils:gen_reg_name(), handler(), options()) ->
     mg_utils:gen_start_ret().
-start_link(RegName, Handler, Storage, RPC, Logger, Options) ->
-    gen_server:start_link(RegName, ?MODULE, {Handler, Storage, RPC, Logger, Options}, []).
+start_link(RegName, Handler, Options) ->
+    gen_server:start_link(RegName, ?MODULE, {Handler, Options}, []).
 
 %% TODO sessions
 -spec send_sync_command(raft_rpc:rpc(), raft_rpc:endpoint(), raft_rpc:endpoint(), raft_rpc:request_id(), raft_storage:command()) ->
@@ -155,26 +165,21 @@ recv_response_command(RPC, ID, Timeout) ->
 .
 
 -opaque state() :: #{
-    options       => options(),
-    timer         => timestamp_ms() | undefined,
+    options => options(),
+    timer => timestamp_ms() | undefined,
 
     % текущая роль и специфичные для неё данные
-    role          => role(),
+    role => role(),
 
     % текущий терм (вообще, имхо, слово "эпоха" тут более подходящее)
-    current_term  => raft_term(),
+    current_term => raft_term(),
+    handler => handler(),
 
-    rpc           => raft_rpc:rpc(),
-    handler       => handler(),
-
-    % модуль и состояния хранилища
-    storage       => storage(),
-
-    % модулья для логгирования эвентов
-    logger        => raft_logger:logger(),
+    % состояние хранилища
+    storage_states => storage(),
 
     % все полученные запросы, которые ожидают ответа
-    requests      => #{raft_rpc:request_id() => raft_rpc:endpoint()}
+    requests => #{raft_rpc:request_id() => raft_rpc:endpoint()}
 }.
 
 -spec init(_) ->
@@ -202,7 +207,7 @@ handle_info(timeout, State) ->
     NewState = handle_timeout(State),
     ok = log_timeout(State, NewState),
     {noreply, NewState, get_timer_timeout(NewState)};
-handle_info({raft_rpc, From, Data}, State = #{rpc := RPC}) ->
+handle_info({raft_rpc, From, Data}, State = #{options := #{rpc := RPC}}) ->
     Message = raft_rpc:recv(RPC, Data),
     NewState = handle_rpc(From, Message, State),
     ok = log_incoming_message(From, Message, State, NewState),
@@ -221,33 +226,30 @@ terminate(_, _) ->
 %%
 %% common handlers
 %%
--spec new_state({handler(), raft_storage:storage(), raft_rpc:rpc(), raft_logger:logger(), options()}) ->
+-spec new_state({handler(), options()}) ->
     state().
-new_state({Handler, StorageModOpts, RPC, Logger, Options}) ->
+new_state({Handler, Options}) ->
     State =
         #{
-            options       => Options,
-            timer         => undefined,
-            role          => {follower, undefined},
-            current_term  => 0,
-            rpc           => RPC,
-            handler       => Handler,
-            storage       => init_storage(StorageModOpts),
-            logger        => Logger,
-            requests      => #{}
+            options        => Options,
+            timer          => undefined,
+            role           => {follower, undefined},
+            current_term   => 0,
+            handler        => Handler,
+            storage_states => init_storage(Options),
+            requests       => #{}
         },
     become_follower(State#{current_term := get_term_from_log(last_log_index(State), State)}).
 
 
--spec init_storage(raft_storage:storage()) ->
+-spec init_storage(options()) ->
     storage().
-init_storage(StorageModOpts) ->
+init_storage(#{storage := Storage}) ->
     #{
-        storage => StorageModOpts,
-        system  => raft_storage:init(StorageModOpts, system ),
-        handler => raft_storage:init(StorageModOpts, handler),
-        log     => raft_storage:init(StorageModOpts, log    ),
-        cmd_id  => raft_storage:init(StorageModOpts, cmd_id )
+        system  => raft_storage:init(Storage, system ),
+        handler => raft_storage:init(Storage, handler),
+        log     => raft_storage:init(Storage, log    ),
+        cmd_id  => raft_storage:init(Storage, cmd_id )
     }.
 
 -spec handle_timeout(state()) ->
@@ -292,7 +294,8 @@ handle_sync_command_rpc(From, ID, Command, State = #{role := {leader, _}, curren
         {_, {_, ID, CommandFromLog}} ->
             exit({incorrect_idempotent_command, ID, Command, CommandFromLog})
     end;
-handle_sync_command_rpc(From, ID, Command, State = #{rpc := RPC, role := {follower, Leader}}) when Leader =/= undefined ->
+handle_sync_command_rpc(From, ID, Command, State = #{options := #{rpc := RPC}, role := {follower, Leader}})
+    when Leader =/= undefined ->
     ok = raft_rpc:send(RPC, From, Leader, {external, ID, {sync_command, Command}}),
     State;
 handle_sync_command_rpc(_, _, _, State = #{role := _}) ->
@@ -426,13 +429,13 @@ is_replicated(Index, State = #{role := {leader, FollowersState}}) ->
 
 -spec has_quorum(non_neg_integer(), state()) ->
     boolean().
-has_quorum(N, #{options := #{others := Others}}) ->
-    N >= (erlang:length(Others) + 1) div 2 + 1.
+has_quorum(N, #{options := #{cluster := Cluster}}) ->
+    N >= (erlang:length(Cluster) div 2 + 1).
 
 -spec new_followers_state(state()) ->
     followers_state().
-new_followers_state(State = #{options := #{others := Others}}) ->
-    maps:from_list([{To, new_follower_state(State)} || To <- Others]).
+new_followers_state(State = #{options := #{cluster := Cluster, self := Self}}) ->
+    maps:from_list([{To, new_follower_state(State)} || To <- (Cluster -- [Self])]).
 
 -spec new_follower_state(state()) ->
     follower_state().
@@ -521,13 +524,13 @@ update_follower(Leader, State = #{role := {follower, _}}) ->
 
 -spec send_request_votes(state()) ->
     ok.
-send_request_votes(State = #{options := #{others := Others}}) ->
+send_request_votes(State = #{options := #{cluster := Cluster, self := Self}}) ->
     LastIndex = last_log_index(State),
     lists:foreach(
         fun(To) ->
             ok = send_int_request(To, request_vote, {LastIndex, get_term_from_log(LastIndex, State)}, State)
         end,
-        Others
+        Cluster -- [Self]
     ).
 
 %% Послать в том случае если:
@@ -616,7 +619,7 @@ send_int_response(To, Type, Succeed, State = #{current_term := CurrentTerm}) ->
 
 -spec send(raft_rpc:endpoint(), raft_rpc:message(), state()) ->
     ok.
-send(To, Message, #{rpc := RPC, options := #{self := Self}}) ->
+send(To, Message, #{options := #{rpc := RPC, self := Self}}) ->
     raft_rpc:send(RPC, Self, To, Message).
 
 -spec get_term_from_log(index(), state()) ->
@@ -686,33 +689,33 @@ apply_commited(Index, State) ->
 
 -spec last_applied(state()) ->
     index().
-last_applied(#{storage := Storage}) ->
-    set_default(storage_get_one(system, last_applied, Storage), 0).
+last_applied(State) ->
+    set_default(storage_get_one(system, last_applied, State), 0).
 
 -spec set_last_applied(index(), state()) ->
     state().
-set_last_applied(Index, State = #{storage := Storage}) ->
-    State#{storage := storage_put(system, [{last_applied, Index}], Storage)}.
+set_last_applied(Index, State) ->
+    storage_put(system, [{last_applied, Index}], State).
 
 -spec commit_index(state()) ->
     index().
-commit_index(#{storage := Storage}) ->
-    set_default(storage_get_one(system, commit_index, Storage), 0).
+commit_index(State) ->
+    set_default(storage_get_one(system, commit_index, State), 0).
 
 -spec set_commit_index(index(), state()) ->
     state().
-set_commit_index(Index, State = #{storage := Storage}) ->
-    State#{storage := storage_put(system, [{commit_index, Index}], Storage)}.
+set_commit_index(Index, State) ->
+    storage_put(system, [{commit_index, Index}], State).
 
 -spec last_log_index(state()) ->
     index().
-last_log_index(#{storage := Storage}) ->
-    set_default(storage_get_one(system, last_log_index, Storage), 0).
+last_log_index(State) ->
+    set_default(storage_get_one(system, last_log_index, State), 0).
 
 -spec set_last_log_index(index(), state()) ->
     state().
-set_last_log_index(Index, State = #{storage := Storage}) ->
-    State#{storage := storage_put(system, [{last_log_index, Index}], Storage)}.
+set_last_log_index(Index, State) ->
+    storage_put(system, [{last_log_index, Index}], State).
 
 -spec try_set_last_log_index(index(), state()) ->
     state().
@@ -721,31 +724,31 @@ try_set_last_log_index(Index, State) ->
 
 -spec log_entry(index(), state()) ->
     log_entry().
-log_entry(Index, #{storage := Storage}) ->
-    set_default(storage_get_one(log, Index, Storage), {0, undefined}).
+log_entry(Index, State) ->
+    set_default(storage_get_one(log, Index, State), {0, undefined}).
 
 -spec log_entries(index(), index(), state()) ->
     [log_entry()].
-log_entries(From, To, #{storage := Storage}) ->
-    storage_get(log, lists:seq(From, To), Storage).
+log_entries(From, To, State) ->
+    storage_get(log, lists:seq(From, To), State).
 
 -spec append_log_entries(index(), [log_entry()], state()) ->
     state().
-append_log_entries(PrevIndex, Entries, State = #{storage := Storage}) ->
+append_log_entries(PrevIndex, Entries, State) ->
     LastIndex = PrevIndex + erlang:length(Entries),
     Values    = lists:zip(lists:seq(PrevIndex + 1, LastIndex), Entries),
     IDs       = [{ID, N} || {N, {_, ID, _}} <- Values],
-    try_set_last_log_index(LastIndex, State#{storage := storage_put(cmd_id, IDs, storage_put(log, Values, Storage))}).
+    try_set_last_log_index(LastIndex, storage_put(cmd_id, IDs, storage_put(log, Values, State))).
 
 -spec last_log_entry(state()) ->
     log_entry() | undefined.
-last_log_entry(State = #{storage := Storage}) ->
-    storage_get_one(log, last_log_index(State), Storage).
+last_log_entry(State) ->
+    storage_get_one(log, last_log_index(State), State).
 
 -spec find_in_log_by_id(raft_rpc:request_id(), state()) ->
     log_entry() | undefined.
-find_in_log_by_id(ID, State = #{storage := Storage}) ->
-    case storage_get_one(cmd_id, ID, Storage) of
+find_in_log_by_id(ID, State) ->
+    case storage_get_one(cmd_id, ID, State) of
         undefined ->
             undefined;
         LogIndex ->
@@ -762,22 +765,22 @@ set_default(Value, _) ->
 %%
 %% interaction with storage
 %%
--spec storage_put(raft_storage:type(), [{raft_storage:key(), raft_storage:value()}], storage()) ->
-    storage().
-storage_put(Type, Values, Storage = #{storage := StorageModOpts}) ->
-    StorageState = maps:get(Type, Storage),
-    NewStorageState = raft_storage:put(StorageModOpts, Values, StorageState),
-    Storage#{Type := NewStorageState}.
+-spec storage_put(raft_storage:type(), [{raft_storage:key(), raft_storage:value()}], state()) ->
+    state().
+storage_put(Type, Values, State = #{options := #{storage := Storage}, storage_states := StorageStates}) ->
+    StorageState = maps:get(Type, StorageStates),
+    NewStorageState = raft_storage:put(Storage, Values, StorageState),
+    State#{storage_states := StorageStates#{Type := NewStorageState}}.
 
--spec storage_get(raft_storage:type(), [raft_storage:key()], storage()) ->
+-spec storage_get(raft_storage:type(), [raft_storage:key()], state()) ->
     [raft_storage:value()].
-storage_get(Type, Keys, Storage = #{storage := StorageModOpts}) ->
-    raft_storage:get(StorageModOpts, Keys, maps:get(Type, Storage)).
+storage_get(Type, Keys, #{options := #{storage := Storage}, storage_states := StorageStates}) ->
+    raft_storage:get(Storage, Keys, maps:get(Type, StorageStates)).
 
--spec storage_get_one(raft_storage:type(), raft_storage:key(), storage()) ->
+-spec storage_get_one(raft_storage:type(), raft_storage:key(), state()) ->
     raft_storage:value().
-storage_get_one(Type, Key, Storage = #{storage := StorageModOpts}) ->
-    raft_storage:get_one(StorageModOpts, Key, maps:get(Type, Storage)).
+storage_get_one(Type, Key, #{options := #{storage := Storage}, storage_states := StorageStates}) ->
+    raft_storage:get_one(Storage, Key, maps:get(Type, StorageStates)).
 
 %%
 %% interaction with handler
@@ -785,10 +788,10 @@ storage_get_one(Type, Key, Storage = #{storage := StorageModOpts}) ->
 %% исполняется на всех в определённой последовательности и может менять стейт
 -spec handle_sync_command(raft_rpc:request_id(), raft_storage:command(), state()) ->
     state().
-handle_sync_command(ID, Command, State = #{handler := Handler, storage := Storage, requests := Requests}) ->
+handle_sync_command(ID, Command, State = #{handler := Handler, storage_states := StorageStates, requests := Requests}) ->
     From = maps:get(ID, Requests, undefined),
     NewHandlerSState = mg_utils:apply_mod_opts(Handler, handle_sync_command, [From, ID, Command, ext_state(State)]),
-    State#{storage := Storage#{handler := NewHandlerSState}, requests := maps:remove(ID, Requests)}.
+    State#{storage_states := StorageStates#{handler := NewHandlerSState}, requests := maps:remove(ID, Requests)}.
 
 %% исполняется на любой ноде, очерёдность не определена, не может менять стейт
 -spec handle_async_command(raft_rpc:endpoint(), raft_rpc:request_id(), raft_storage:command(), state()) ->
@@ -799,12 +802,11 @@ handle_async_command(From, ID, Command, State = #{handler := Handler}) ->
 
 -spec ext_state(state()) ->
     ext_state().
-ext_state(#{rpc := RPC, options := Options, storage := Storage, role := Role}) ->
+ext_state(#{options := Options, storage_states := StorageStates, role := Role}) ->
     #{
-        rpc     => RPC,
-        options => Options,
-        storage => Storage,
-        role    => ext_role(Role)
+        options        => Options,
+        storage_states => StorageStates,
+        role           => ext_role(Role)
     }.
 
 -spec
@@ -831,12 +833,12 @@ lists_unzip_element(N, List) ->
 %%
 -spec log_timeout(state(), state()) ->
     ok.
-log_timeout(StateBefore = #{logger := Logger}, StateAfter) ->
+log_timeout(StateBefore = #{options := #{logger := Logger}}, StateAfter) ->
     raft_logger:log(Logger, timeout, StateBefore, StateAfter).
 
 -spec log_incoming_message(raft_rpc:endpoint(), raft_rpc:message(), state(), state()) ->
     ok.
-log_incoming_message(From, Message, StateBefore = #{logger := Logger}, StateAfter) ->
+log_incoming_message(From, Message, StateBefore = #{options := #{logger := Logger}}, StateAfter) ->
     raft_logger:log(Logger, {incoming_message, From, Message}, StateBefore, StateAfter).
 
 %%

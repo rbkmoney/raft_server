@@ -3,95 +3,131 @@
 %%
 -module(raft_server).
 
-% call() ->
+%% API
+-export_type([handler      /0]).
+-export_type([handler_state/0]).
+-export_type([reply_action /0]).
+-export([start_link/3]).
+-export([sync_call /5]).
+-export([reply     /4]).
+
+%% raft
+-behaviour(raft).
+-export([handle_sync_command /5]).
+-export([handle_async_command/5]).
+
+%%
+%% API
+%%
+-type handler() :: mg_utils:mod_opts().
+-type handler_state() :: term().
+-type reply_action() :: {reply, _Reply} | noreply.
+
+%%
+
+% -callback init(_) ->
+%     raft_storage:state().
+
+-callback handle_leader_sync_call(_, raft_rpc:endpoint() | undefined, raft_rpc:request_id(), _Call, handler_state()) ->
+    {reply_action(), handler_state()}.
+
+-callback handle_follower_sync_call(_, raft_rpc:request_id(), _Call, handler_state()) ->
+    handler_state().
+
+% -callback handle_async_call(raft_rpc:request_id(), _From, _Call, state()) ->
+%     {reply, _Reply} | noreply.
+
+% -callback handle_sync_cast(raft_rpc:request_id(), _From, _Call, state()) ->
+%     {reply, _Reply} | noreply.
+
+% -callback handle_async_cast(raft_rpc:request_id(), _From, _Call, state()) ->
+%     {reply, _Reply} | noreply.
+
+% -callback handle_info(_Info, state()) ->
+%     noreply.
+
+%%
+
+-spec start_link(mg_utils:gen_reg_name(), handler(), raft:options()) ->
+    mg_utils:gen_start_ret().
+start_link(RegName, Handler, Options) ->
+    raft:start_link(RegName, {?MODULE, Handler}, Options).
+
+-spec sync_call(raft_rpc:rpc(), [raft_rpc:endpoint()], raft_rpc:request_id(), raft_storage:command(), genlib_retry:strategy()) ->
+    ok.
+sync_call(RPC, Cluster, ID, Call, Retry) ->
+    request(RPC, Cluster, ID, Call, Retry).
+
+% -spec async_call(raft_rpc:rpc(), [raft_rpc:endpoint()], raft_storage:command()) ->
 %     ok.
+% async_call(RPC, Cluster, ID, Call) ->
+%     request(RPC, Cluster, {external, {async_call, Call}}).
 
-% cast() ->
-%     ok.
+-spec reply(raft_rpc:rpc(), raft_rpc:endpoint(), raft_rpc:request_id(), raft_storage:command()) ->
+    ok.
+reply(RPC, To, ID, Call) ->
+    ok = raft:send_response_command(RPC, raft_rpc:self(RPC), To, ID, Call).
 
-% async_call() ->
-%     ok.
+%%
 
+-spec request(raft_rpc:rpc(), [raft_rpc:endpoint()], [raft_rpc:endpoint()], raft_rpc:request_id(), _, genlib_retry:strategy()) ->
+    term().
+request(RPC, Cluster = [], ID, Call, Retry) ->
+    erlang:error(badarg, [RPC, ID, Call, Cluster, Retry]);
+request(RPC, Cluster, ID, Call, Retry) ->
+    request(RPC, Cluster, Cluster, ID, Call, Retry).
 
+-spec request(raft_rpc:rpc(), raft_rpc:request_id(), _, [raft_rpc:endpoint()], [raft_rpc:endpoint()]) ->
+    term().
+request(RPC, [], AllCluster, ID, Call, Retry) ->
+    request(RPC, AllCluster, AllCluster, ID, Call, Retry);
+request(RPC, Cluster, AllCluster, ID, Call, Retry) ->
+    To = raft_rpc:get_nearest(RPC, Cluster),
+    ok = raft:send_sync_command(RPC, raft_rpc:self(RPC), To, ID, Call),
+    case genlib_retry:next_step(Retry) of
+        {wait, Timeout, NewRetry} ->
+            case raft:recv_response_command(RPC, ID, Timeout) of
+                {ok, _Leader, Value} ->
+                    Value;
+                timeout ->
+                    request(RPC, Cluster -- [To], AllCluster, ID, Call, NewRetry)
+            end;
+        finish ->
+            % TODO сделать аналогично gen_server
+            erlang:error({timeout, Cluster, ID, Call})
+    end.
 
+%%
 
-% -type request_id() :: term().
+-spec handle_async_command(_, raft_rpc:endpoint(), raft_rpc:request_id(), raft_storage:command(), raft:ext_state()) ->
+    ok.
+handle_async_command(_, _From, _ID, _, _) ->
+    % TODO
+    ok.
 
-% -opaque client_session() :: #{
-%     rpc     => raft_rpc:rpc(),
-%     self    => raft_rpc:endpoint(),
-%     cluster => [raft_rpc:endpoint()],
-%     timeout => timeout_ms(),
-%     leader  => raft_rpc:endpoint() | undefined
-% }.
+-spec handle_sync_command(handler(), raft_rpc:endpoint() | undefined, raft_rpc:request_id(), _, raft:ext_state()) ->
+    ok.
+handle_sync_command(Handler, From, ID, Call, #{options := #{rpc := RPC, storage := Storage}, storage_states := #{handler := State}, role := leader}) ->
+    {ReplyAction, NewHandlerState} =
+        handle_leader_sync_call(Handler, From, ID, Call, raft_storage:get_one(Storage, state, State)),
+    case ReplyAction of
+        {reply, Reply} -> ok = raft:send_response_command(RPC, raft_rpc:self(RPC), From, ID, Reply);
+        noreply        -> ok
+    end,
+    raft_storage:put(Storage, [{state, NewHandlerState}], State);
+handle_sync_command(Handler, _From, ID, Call, #{options := #{storage := Storage}, storage_states := #{handler := State}, role := {follower, _}}) ->
+    NewHandlerState = handle_follower_sync_call(Handler, ID, Call, raft_storage:get_one(Storage, state, State)),
+    raft_storage:put(Storage, [{state, NewHandlerState}], State).
 
-% -spec new_client_session(raft_rpc:rpc(), raft_rpc:endpoint(), [raft_rpc:endpoint()], timeout_ms()) ->
-%     client_session().
-% new_client_session(RPC, Self, Cluster, AttemptTimeout) ->
-%     #{
-%         rpc     => RPC,
-%         self    => Self,
-%         cluster => Cluster,
-%         timeout => AttemptTimeout,
-%         leader  => undefined
-%     }.
+%%
 
-% -spec sync_call(client_session(), request_id(), Request, Deadline) ->
-%     {Response, Session}.
-% sync_call(Session = #{self := From}, CallID, Call, Deadline) ->
-%     ok = send_command(Session, {client_interaction, sync_call, CallID, Call, From}),
-%     case recv_command(Session) of
-%         timeout ->
-%             sync_call(Session, CallID, Call, Deadline);
-%         {client_interaction, sync_call_reply, CallID, Reply, From} ->
-%             {set_session_leader(From), Reply}
-%     end.
+-spec handle_leader_sync_call(handler(), raft_rpc:endpoint() | undefined, raft_rpc:request_id(), _, handler_state()) ->
+    {reply_action(), handler_state()}.
+handle_leader_sync_call(Handler, From, ID, Call, State) ->
+    mg_utils:apply_mod_opts(Handler, handle_leader_sync_call, [From, ID, Call, State]).
 
-% async_call(Session, Call, Deadline) ->
-%     ok = send_command(Session, {client_interaction, async_call, Call, From}),
-%     case recv_command(Session) of
-%         timeout ->
-%             async_call(Session, Call, Deadline);
-%         {client_interaction, async_call_reply, Reply, From} ->
-%             {set_session_leader(From), Reply}
-%     end.
+-spec handle_follower_sync_call(handler(), raft_rpc:request_id(), _, handler_state()) ->
+    handler_state().
+handle_follower_sync_call(Handler, ID, Call, State) ->
+    mg_utils:apply_mod_opts(Handler, handle_follower_sync_call, [ID, Call, State]).
 
-% -spec sync_cast(client_session(), request_id(), _Cast, mg_utils:deadline()) ->
-% sync_cast(Session, Cast, Deadline) ->
-%     ok = send_command(Session, {client_interaction, sync_cast, Cast, From}),
-%     case recv_command(Session) of
-%         timeout ->
-%             sync_cast(Session, Cast, Deadline);
-%         {client_interaction, sync_cast, Reply, From} ->
-%             {set_session_leader(From), Reply}
-%     end.
-
-% % {client_request, RequestID, Response, From}
-
-% -spec send_command(Session, request_id(), Command) ->
-%     ok.
-% send_command(Session = #{self := From}, Command) ->
-%     % выбрать локальный (если можно) или рандомный эндпоинт
-%     % послать ему команду и ждать
-%     % когда придёт ответ, из поля From можно взять текущего лидера
-%     ok = raft_rpc:send(RPC, select_endpoint(Session), Command),
-
-% -spec recv_command(client_session()) ->
-%     command() | timeout.
-% recv_command(Session#{timeout := Timeout}) ->
-%     receive
-%         {raft_rpc, Data} ->
-%             raft_rpc:recv(RPC, Data),
-%     after Timeout ->
-%         % TODO check timeout
-%         timeout
-%     end.
-
-% select_endpoint(#{cluster := Cluster}) ->
-%     % TODO поискать локальный
-%     lists_random(Cluster).
-
-% -spec lists_random(list(T)) ->
-%     T.
-% lists_random(List) ->
-%     lists:nth(rand:uniform(length(List)), List).
