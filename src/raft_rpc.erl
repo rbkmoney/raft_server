@@ -15,12 +15,12 @@
 -export_type([external_message_type/0]).
 -export_type([internal_message_type/0]).
 -export_type([message_body         /0]).
--export([send           /4]).
--export([recv           /2]).
--export([get_nearest    /2]).
--export([self           /1]).
--export([format_endpoint/1]).
--export([format_message /1]).
+-export([send              /4]).
+-export([recv              /2]).
+-export([get_nearest       /2]).
+-export([get_reply_endpoint/1]).
+-export([format_endpoint   /1]).
+-export([format_message    /1]).
 
 %%
 %% API
@@ -68,7 +68,7 @@
 -callback get_nearest(_, [endpoint()]) ->
     endpoint().
 
--callback self(_) ->
+-callback get_reply_endpoint(_) ->
     endpoint().
 
 %%
@@ -88,10 +88,10 @@ recv(RPC, Data) ->
 get_nearest(RPC, Endpoints) ->
     mg_utils:apply_mod_opts(RPC, get_nearest, [Endpoints]).
 
--spec self(mg_utils:mod_opts()) ->
+-spec get_reply_endpoint(mg_utils:mod_opts()) ->
     endpoint().
-self(RPC) ->
-    mg_utils:apply_mod_opts(RPC, self, []).
+get_reply_endpoint(RPC) ->
+    mg_utils:apply_mod_opts(RPC, get_reply_endpoint, []).
 
 %% TODO callback
 -spec format_endpoint(endpoint()) ->

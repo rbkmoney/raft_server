@@ -13,7 +13,7 @@
 
 %% raft_rpc
 -behaviour(raft_rpc).
--export([send/4, recv/2, get_nearest/2, self/1]).
+-export([send/4, recv/2, get_nearest/2, get_reply_endpoint/1]).
 
 %%
 %% API
@@ -55,9 +55,9 @@ get_nearest({SelfNodePeer, _}, Endpoints) ->
             mg_utils:lists_random(Endpoints)
     end.
 
--spec self({peer(), mg_utils:gen_ref()}) ->
+-spec get_reply_endpoint({peer(), mg_utils:gen_ref()}) ->
     endpoint().
-self({SelfNodePeer, _}) ->
+get_reply_endpoint({SelfNodePeer, _}) ->
     {SelfNodePeer, erlang:self()}.
 
 %%

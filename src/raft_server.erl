@@ -66,7 +66,7 @@ sync_call(RPC, Cluster, ID, Call, Retry) ->
 -spec reply(raft_rpc:rpc(), raft_rpc:endpoint(), raft_rpc:request_id(), raft_storage:command()) ->
     ok.
 reply(RPC, To, ID, Call) ->
-    ok = raft:send_response_command(RPC, raft_rpc:self(RPC), To, ID, Call).
+    ok = raft:send_response_command(RPC, raft_rpc:get_reply_endpoint(RPC), To, ID, Call).
 
 %%
 
@@ -83,7 +83,7 @@ request(RPC, [], AllCluster, ID, Call, Retry) ->
     request(RPC, AllCluster, AllCluster, ID, Call, Retry);
 request(RPC, Cluster, AllCluster, ID, Call, Retry) ->
     To = raft_rpc:get_nearest(RPC, Cluster),
-    ok = raft:send_sync_command(RPC, raft_rpc:self(RPC), To, ID, Call),
+    ok = raft:send_sync_command(RPC, raft_rpc:get_reply_endpoint(RPC), To, ID, Call),
     case genlib_retry:next_step(Retry) of
         {wait, Timeout, NewRetry} ->
             case raft:recv_response_command(RPC, ID, Timeout) of
@@ -111,7 +111,7 @@ handle_sync_command(Handler, From, ID, Call, #{options := #{rpc := RPC, storage 
     {ReplyAction, NewHandlerState} =
         handle_leader_sync_call(Handler, From, ID, Call, raft_storage:get_one(Storage, state, State)),
     case ReplyAction of
-        {reply, Reply} -> ok = raft:send_response_command(RPC, raft_rpc:self(RPC), From, ID, Reply);
+        {reply, Reply} -> ok = raft:send_response_command(RPC, raft_rpc:get_reply_endpoint(RPC), From, ID, Reply);
         noreply        -> ok
     end,
     raft_storage:put(Storage, [{state, NewHandlerState}], State);
