@@ -10,6 +10,7 @@
 -export([put    /3]).
 -export([get    /3]).
 -export([get_one/3]).
+-export([remove /3]).
 
 -type state() :: #{
     raft_storage:key() => raft_storage:value()
@@ -38,3 +39,8 @@ get(_, Keys, State) ->
     raft_storage:value() | undefined.
 get_one(_, Key, State) ->
     maps:get(Key, State, undefined).
+
+-spec remove(_, [raft_storage:key()], state()) ->
+    state().
+remove(_, Keys, State) ->
+    maps:without(Keys, State).

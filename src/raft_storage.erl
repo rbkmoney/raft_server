@@ -13,6 +13,7 @@
 -export([put    /3]).
 -export([get    /3]).
 -export([get_one/3]).
+-export([remove /3]).
 
 -type type   () :: system | log | handler | cmd_id.
 -type key    () :: term().
@@ -35,6 +36,9 @@
 -callback get_one(_, key(), state()) ->
     value() | undefined.
 
+-callback remove(_, [key()], state()) ->
+    state().
+
 %%
 
 -spec init(storage(), type()) ->
@@ -56,3 +60,8 @@ get(Storage, Keys, State) ->
     value().
 get_one(Storage, Key, State) ->
     mg_utils:apply_mod_opts(Storage, get_one, [Key, State]).
+
+-spec remove(storage(), [key()], state()) ->
+    state().
+remove(Storage, Keys, State) ->
+    mg_utils:apply_mod_opts(Storage, remove, [Keys, State]).
