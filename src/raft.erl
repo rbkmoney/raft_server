@@ -17,6 +17,9 @@
 %%%   - msgpack для сериализации
 %%%   - асинхронная обработка запроса с чеком лидерства
 %%%   - рефакторинг и причёсывание
+%%%   - сессия обращения
+%%%   - добавить handle_info
+%%%   -
 %%%  - проблемы:
 %%%   - нет проверки лидерства при обработке команды
 %%%   - репликация команды из прошлой эпохи
@@ -25,7 +28,9 @@
 %%%   - упадёт когда лидеру придёт ответ на append_entries с новым термом (эпохой)
 %%%   - нет проверки lastLog при отдаче голоса
 %%%   -
-%%%  - переделать работу со storage (и придумать как, но то, что есть — хрень :-\ )
+%%%  - рефакторинг:
+%%%   - вынести отдельно raft_rpc_server и переименовать в raft_server
+%%%   - переделать работу со storage (и придумать как, но то, что есть — хрень :-\ )
 %%%
 -module(raft).
 
@@ -321,7 +326,7 @@ handle_external_rpc(From, ID, {async_command, Command}, State) ->
 -spec handle_command_rpc(raft_rpc:endpoint(), raft_rpc:request_id(), command(), state()) ->
     state().
 handle_command_rpc(From, ID, Command, State = #{role := {leader, _}}) ->
-    try_handle_next_command(append_command(ID, From, Command, State));
+    try_commit(try_handle_next_command(append_command(ID, From, Command, State)));
 handle_command_rpc(From, ID, Command, State = #{options := #{rpc := RPC}, role := {follower, Leader}})
     when Leader =/= undefined ->
     ok = raft_rpc:send(RPC, From, Leader, {external, ID, {command, Command}}),
@@ -390,13 +395,7 @@ handle_rpc_response(append_entries, From, Succeed, State = #{role := {leader, Fo
             match_index = NewMatchIndex,
             rpc_timeout = 0
         },
-    try_send_append_entries(
-        try_commit(
-            last_log_index(State),
-            commit_index  (State),
-            update_leader_follower(From, NewFollowerState, State)
-        )
-    ).
+    try_send_append_entries(try_commit(update_leader_follower(From, NewFollowerState, State))).
 
 %%
 
@@ -424,6 +423,11 @@ try_become_leader(State = #{role := {candidate, Votes}}) ->
         false ->
             State
     end.
+
+-spec try_commit(state()) ->
+    state().
+try_commit(State) ->
+    try_commit(last_log_index(State), commit_index(State), State).
 
 -spec try_commit(index(), index(), state()) ->
     state().
@@ -527,7 +531,7 @@ become_candidate_(State) ->
             )
         ),
     ok = send_request_votes(NewState),
-    NewState.
+    try_become_leader(NewState).
 
 -spec
 become_leader(state()                          ) -> state().
@@ -685,8 +689,12 @@ schedule_election_timer(State = #{options := #{election_timeout := Timeout}}) ->
 
 -spec schedule_next_heartbeat_timer(state()) ->
     state().
-schedule_next_heartbeat_timer(State = #{role := {leader, FollowersState}}) ->
-    NextHeardbeat = lists:min(lists_unzip_element(#follower_state.heartbeat, maps:values(FollowersState))),
+schedule_next_heartbeat_timer(State = #{options := #{broadcast_timeout := BroadcastTimeout}, role := {leader, FollowersState}}) ->
+    NextHeardbeat =
+        lists:min(
+            [now_ms() + BroadcastTimeout] ++
+            lists_unzip_element(#follower_state.heartbeat, maps:values(FollowersState))
+        ),
     State#{timer := NextHeardbeat}.
 
 -spec schedule_timer(timestamp_ms(), state()) ->
@@ -707,7 +715,7 @@ now_ms() ->
 -spec randomize_timeout(timeout_ms() | {From::timeout_ms(), To::timeout_ms()}) ->
     timeout_ms().
 randomize_timeout({From, To}) ->
-    rand:uniform(To - From) + From;
+    rand:uniform(erlang:abs(To - From)) + From;
 randomize_timeout(Const) ->
     Const.
 

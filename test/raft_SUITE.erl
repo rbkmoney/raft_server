@@ -20,10 +20,7 @@
 
 %% raft
 -behaviour(raft).
--export([init                /1]).
--export([handle_command      /4]).
--export([handle_async_command/4]).
--export([apply_delta         /4]).
+-export([init/1, handle_command/4, handle_async_command/4, apply_delta/4]).
 
 %% raft_logger
 -behaviour(raft_logger).
@@ -106,6 +103,7 @@ init_per_suite(C) ->
     % dbg:tpl({?MODULE, handle_sync_command, '_'}, x),
 
     [
+          % {cluster, [a]}
           % {cluster, [a, b, c]}
           {cluster, [a, b, c, d, e]}
         , {apps, Apps}
