@@ -19,9 +19,11 @@
 -export([sleep                /1]).
 
 %% raft
--behaviour(raft_server).
--export([handle_leader_sync_call  /5]).
--export([handle_follower_sync_call/4]).
+-behaviour(raft).
+-export([init                /1]).
+-export([handle_command      /4]).
+-export([handle_async_command/4]).
+-export([apply_delta         /4]).
 
 %% raft_logger
 -behaviour(raft_logger).
@@ -171,9 +173,7 @@ reelection(C) ->
 test_write_read(C) ->
     Rand = rand:uniform(1000000),
     ok = write_value(?config(rpc, C), ?config(cluster, C), Rand),
-    Rand = sync_read_value(?config(rpc, C), ?config(cluster, C)).
-    % Rand = async_read_value(?config(rpc, C), ?config(cluster, C)).
-
+    Rand = read_value(?config(rpc, C), ?config(cluster, C)).
 
 -spec sleep(config()) ->
     _.
@@ -212,7 +212,7 @@ start_raft(RPC, Cluster, Name) ->
 -spec start_raft_(rpc_config(), cluster_config (), name()) ->
     mg_utils:gen_start_ret().
 start_raft_(RPC, Cluster, Name) ->
-    raft_server:start_link(
+    raft:start_link(
         {local, Name},
         ?MODULE,
         raft_options(RPC, Cluster, Name)
@@ -328,22 +328,24 @@ sctp_name_to_port(d     ) -> 4;
 sctp_name_to_port(e     ) -> 5.
 
 %%
-%% raft_server
+%% raft
 %%
+-type command() :: read_value | get_leader | {write_value, _}.
+
 -spec write_value(rpc_config(), cluster_config(), term()) ->
     ok.
 write_value(RPCConfig, ClusterConfig, Value) ->
-    raft_server_call(RPCConfig, ClusterConfig, {write_value, Value}).
+    send_command(RPCConfig, ClusterConfig, {write_value, Value}).
 
--spec sync_read_value(rpc_config(), cluster_config()) ->
+-spec read_value(rpc_config(), cluster_config()) ->
     term().
-sync_read_value(RPCConfig, ClusterConfig) ->
-    raft_server_call(RPCConfig, ClusterConfig, read_value).
+read_value(RPCConfig, ClusterConfig) ->
+    send_command(RPCConfig, ClusterConfig, read_value).
 
 -spec get_leader(rpc_config(), cluster_config()) ->
     raft_rpc:endpoint().
 get_leader(RPCConfig, ClusterConfig) ->
-    raft_server_call(RPCConfig, ClusterConfig, get_leader).
+    send_command(RPCConfig, ClusterConfig, get_leader).
 
 -spec kill_leader(rpc_config(), cluster_config()) ->
     ok.
@@ -351,39 +353,47 @@ kill_leader(RPCConfig, ClusterConfig) ->
     Leader = get_leader(RPCConfig, ClusterConfig),
     exit(Leader, kill).
 
--spec new_request_id() ->
-    raft_rpc:request_id().
-new_request_id() ->
-    rand:uniform(1000000).
-
--spec raft_server_call(rpc_config(), cluster_config(), _Call) ->
+-spec send_command(rpc_config(), cluster_config(), _Call) ->
     _.
-raft_server_call(RPCConfig, ClusterConfig, Call) ->
-    raft_server:sync_call(
+send_command(RPCConfig, ClusterConfig, Command) ->
+    raft:send_command(
         rpc_mod_opts(RPCConfig, a),
         cluster(RPCConfig, ClusterConfig),
-        new_request_id(),
-        Call,
+        undefined,
+        Command,
         genlib_retry:linear(10, 100)
     ).
 
 %%
+-type state() :: _.
+-type delta() :: _.
 
--spec handle_leader_sync_call(_, raft_rpc:endpoint() | undefined, raft_rpc:request_id(), _Call, _) ->
-    {raft_server:reply_action(), _}.
-handle_leader_sync_call(_, _, _, get_leader, State) ->
-    {{reply, erlang:self()}, State};
-handle_leader_sync_call(_, _, _, read_value, State) ->
-    {{reply, State}, State};
-handle_leader_sync_call(_, _, _, {write_value, Value}, _) ->
+-spec init(_) ->
+    state().
+init(_) ->
+    undefined.
+
+-spec handle_async_command(_, raft_rpc:request_id(), command(), state()) ->
+    raft:reply_action().
+handle_async_command(_, _, _, _) ->
+    _ = exit(1),
+    noreply.
+
+-spec handle_command(_, raft_rpc:request_id(), command(), state()) ->
+    {raft:reply_action(), delta() | undefined}.
+handle_command(_, _, get_leader, _State) ->
+    {{reply, erlang:self()}, undefined};
+handle_command(_, _, read_value, State) ->
+    {{reply, State}, undefined};
+handle_command(_, _, {write_value, Value}, _) ->
     {{reply, ok}, Value}.
 
--spec handle_follower_sync_call(_, raft_rpc:request_id(), _Call, _) ->
-    _.
-handle_follower_sync_call(_, _, {write_value, Value}, _) ->
-    Value;
-handle_follower_sync_call(_, _, _, State) ->
-    State.
+-spec apply_delta(_, raft_rpc:request_id(), delta(), state()) ->
+    state().
+apply_delta(_, _, Value, _) ->
+    Value.
+
+
 
 %%
 %% logger

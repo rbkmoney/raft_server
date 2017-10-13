@@ -34,7 +34,7 @@
 .
 
 -type external_message_type() ::
-      sync_command
+      command
     | async_command
     | response_command
 .
@@ -121,6 +121,6 @@ format_int_type(append_entries         ) -> "append_entries".
 
 -spec
 format_ext_type(external_message_type()) -> list().
-format_ext_type(sync_command           ) -> "scmd" ;
+format_ext_type(command                ) -> "cmd" ;
 format_ext_type(async_command          ) -> "ascmd";
 format_ext_type(response_command       ) -> "rcmd" .
