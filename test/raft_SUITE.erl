@@ -373,24 +373,24 @@ init(_) ->
     undefined.
 
 -spec handle_election(_, state()) ->
-    undefined.
-handle_election(_, _) ->
-    undefined.
+    {undefined, state()}.
+handle_election(_, State) ->
+    {undefined, State}.
 
 -spec handle_async_command(_, raft_rpc:request_id(), command(), state()) ->
-    raft:reply_action().
-handle_async_command(_, _, _, _) ->
+    {raft:reply_action(), state()}.
+handle_async_command(_, _, _, State) ->
     _ = exit(1),
-    noreply.
+    {noreply, State}.
 
 -spec handle_command(_, raft_rpc:request_id(), command(), state()) ->
-    {raft:reply_action(), delta() | undefined}.
-handle_command(_, _, get_leader, _State) ->
-    {{reply, erlang:self()}, undefined};
+    {raft:reply_action(), delta() | undefined, state()}.
+handle_command(_, _, get_leader, State) ->
+    {{reply, erlang:self()}, undefined, State};
 handle_command(_, _, read_value, State) ->
-    {{reply, State}, undefined};
-handle_command(_, _, {write_value, Value}, _) ->
-    {{reply, ok}, Value}.
+    {{reply, State}, undefined, State};
+handle_command(_, _, {write_value, Value}, State) ->
+    {{reply, ok}, Value, State}.
 
 -spec apply_delta(_, raft_rpc:request_id(), delta(), state()) ->
     state().

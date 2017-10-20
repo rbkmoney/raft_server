@@ -102,48 +102,48 @@ init(_) ->
     undefined.
 
 -spec handle_election(_, state()) ->
-    undefined.
-handle_election(_, _) ->
-    undefined.
+    {undefined, state()}.
+handle_election(_, State) ->
+    {undefined, State}.
 
 -spec handle_async_command(raft_utils:gen_ref(), raft_rpc:request_id(), async_command(), state()) ->
-    raft:reply_action().
-handle_async_command(SupRef, _, {get_childspec, ID}, undefined) ->
-    {reply, supervisor:get_childspec(SupRef, ID)};
-handle_async_command(SupRef, _, {is_started, ID}, undefined) ->
+    {raft:reply_action(), state()}.
+handle_async_command(SupRef, _, {get_childspec, ID}, State) ->
+    {reply, supervisor:get_childspec(SupRef, ID), State};
+handle_async_command(SupRef, _, {is_started, ID}, State) ->
     Reply =
         case supervisor:get_childspec(SupRef, ID) of
             {ok   , _        } -> true;
             {error, not_found} -> false
         end,
-    {reply, Reply}.
+    {{reply, Reply}, State}.
 
 -spec handle_command(raft_utils:gen_ref(), raft_rpc:request_id(), sync_command(), state()) ->
-    {raft:reply_action(), delta() | undefined}.
-handle_command(SupRef, _, {start_child, ChildSpec = #{id := ID}}, _State) ->
+    {raft:reply_action(), delta() | undefined, state()}.
+handle_command(SupRef, _, {start_child, ChildSpec = #{id := ID}}, State) ->
     case supervisor:get_childspec(SupRef, ID) of
         {ok, _} ->
-            {{reply, {error, already_present}}, undefined};
+            {{reply, {error, already_present}}, undefined, State};
         {error, not_found} ->
-            {{reply, ok}, {start_child, ChildSpec}}
+            {{reply, ok}, {start_child, ChildSpec}, State}
     end;
-handle_command(SupRef, _, {stop_child, ID}, _State) ->
+handle_command(SupRef, _, {stop_child, ID}, State) ->
     case supervisor:get_childspec(SupRef, ID) of
         {ok, _} ->
-            {{reply, ok}, {stop_child, ID}};
+            {{reply, ok}, {stop_child, ID}, State};
         Error = {error, not_found} ->
-            {{reply, Error}, undefined}
+            {{reply, Error}, undefined, State}
     end.
 
 -spec apply_delta(raft_utils:gen_ref(), raft_rpc:request_id(), delta(), state()) ->
     state().
-apply_delta(SupRef, _, {start_child, ChildSpec}, undefined) ->
+apply_delta(SupRef, _, {start_child, ChildSpec}, State) ->
     {ok, _} = supervisor:start_child(SupRef, ChildSpec),
-    undefined;
-apply_delta(SupRef, _, {stop_child, ID}, undefined) ->
+    State;
+apply_delta(SupRef, _, {stop_child, ID}, State) ->
     ok = supervisor:terminate_child(SupRef, ID),
     ok = supervisor:delete_child(SupRef, ID),
-    undefined.
+    State.
 
 %%
 

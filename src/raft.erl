@@ -113,14 +113,15 @@
     handler_state().
 
 -callback handle_election(_, handler_state()) ->
-    maybe_delta().
+    {maybe_delta(), handler_state()}.
 
 -callback handle_async_command(_, raft_rpc:request_id(), command(), handler_state()) ->
-    reply_action().
+    {reply_action(), handler_state()}.
 
 -callback handle_command(_, raft_rpc:request_id(), command(), handler_state()) ->
-    {reply_action(), maybe_delta()}.
+    {reply_action(), maybe_delta(), handler_state()}.
 
+%% применение происходит только после консенсусного принятия этого изменения
 -callback apply_delta(_, raft_rpc:request_id(), delta(), handler_state()) ->
     handler_state().
 
@@ -857,12 +858,14 @@ handler_init(Handler) ->
 -spec handler_handle_election(state()) ->
     state().
 handler_handle_election(State = #{handler := Handler, handler_state := HandlerState, current_term := CurrentTerm}) ->
-    case raft_utils:apply_mod_opts(Handler, handle_election, [HandlerState]) of
+    {Delta, NewHandlerState} = raft_utils:apply_mod_opts(Handler, handle_election, [HandlerState]),
+    NewState = State#{handler_state := NewHandlerState},
+    case Delta of
         undefined ->
-            State;
+            NewState;
         Delta ->
             % TODO подумать про request_id
-            append_log_entries(last_log_index(State), [{CurrentTerm, undefined, Delta}], State)
+            append_log_entries(last_log_index(State), [{CurrentTerm, undefined, Delta}], NewState)
     end.
 
 %%
@@ -875,22 +878,24 @@ handler_handle_election(State = #{handler := Handler, handler_state := HandlerSt
 -spec handler_handle_command(raft_rpc:request_id(), raft_rpc:endpoint(), command(), state()) ->
     state().
 handler_handle_command(ID, From, Command, State = #{handler := Handler, handler_state := HandlerState, current_term := CurrentTerm}) ->
-    {Reply, Delta} = raft_utils:apply_mod_opts(Handler, handle_command, [ID, Command, HandlerState]),
+    {Reply, Delta, NewHandlerState} = raft_utils:apply_mod_opts(Handler, handle_command, [ID, Command, HandlerState]),
+    NewState = State#{handler_state := NewHandlerState},
     case Delta of
         undefined ->
-            ok = send_reply(From, ID, Reply, State),
+            ok = send_reply(From, ID, Reply, NewState),
             State;
         _ ->
-            append_log_entries(last_log_index(State), [{CurrentTerm, ID, Delta}], State#{reply := {From, ID, Reply}})
+            append_log_entries(last_log_index(NewState), [{CurrentTerm, ID, Delta}], NewState#{reply := {From, ID, Reply}})
     end.
 
 %% исполняется на любой ноде, очерёдность не определена, не может менять стейт
 -spec handler_handle_async_command(raft_rpc:endpoint(), raft_rpc:request_id(), command(), state()) ->
     state().
 handler_handle_async_command(From, ID, Command, State = #{handler := Handler, handler_state := HandlerState}) ->
-    Reply = raft_utils:apply_mod_opts(Handler, handle_async_command, [ID, Command, HandlerState]),
-    ok = send_reply(From, ID, Reply, State),
-    State.
+    {Reply, NewHandlerState} = raft_utils:apply_mod_opts(Handler, handle_async_command, [ID, Command, HandlerState]),
+    NewState = State#{handler_state := NewHandlerState},
+    ok = send_reply(From, ID, Reply, NewState),
+    NewState.
 
 -spec handler_apply_delta(raft_rpc:request_id(), delta(), state()) ->
     state().

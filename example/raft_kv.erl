@@ -79,23 +79,23 @@ init(_) ->
     #{}.
 
 -spec handle_election(_, state()) ->
-    undefined.
-handle_election(_, _) ->
-    undefined.
+    {delta() | undefined, state()}.
+handle_election(_, State) ->
+    {undefined, State}.
 
 -spec handle_async_command(_, raft_rpc:request_id(), async_command(), state()) ->
-    raft:reply_action().
+    {raft:reply_action(), state()}.
 handle_async_command(_, _, {get, Key}, State) ->
-    {reply, do_get(Key, State)}.
+    {reply, do_get(Key, State), State}.
 
 -spec handle_command(raft_utils:gen_ref(), raft_rpc:request_id(), sync_command(), state()) ->
-    {raft:reply_action(), delta() | undefined}.
+    {raft:reply_action(), delta() | undefined, state()}.
 handle_command(_, _, {get, Key}, State) ->
-    {{reply, do_get(Key, State)}, undefined};
+    {{reply, do_get(Key, State)}, undefined, State};
 handle_command(_, _, Put = {put, _, _}, _State) ->
-    {{reply, ok}, Put};
+    {{reply, ok}, Put, State};
 handle_command(_, _, Remove = {remove, _}, _State) ->
-    {{reply, ok}, Remove}.
+    {{reply, ok}, Remove, State}.
 
 -spec apply_delta(_, raft_rpc:request_id(), delta(), state()) ->
     state().
