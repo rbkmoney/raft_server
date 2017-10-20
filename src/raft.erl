@@ -19,6 +19,7 @@
 %%%   - рефакторинг и причёсывание
 %%%   - сессия обращения
 %%%   - добавить handle_info
+%%%   - лимит на длинну очереди команд
 %%%   -
 %%%  - проблемы:
 %%%   - нет проверки лидерства при обработке команды
@@ -42,6 +43,7 @@
 -export_type([index        /0]).
 -export_type([command      /0]).
 -export_type([delta        /0]).
+-export_type([maybe_delta  /0]).
 -export_type([reply        /0]).
 -export_type([reply_action /0]).
 -export_type([log_entry    /0]).
@@ -86,13 +88,14 @@
     logger            => raft_logger:logger()
 }.
 
--type raft_term() :: non_neg_integer().
--type index    () :: non_neg_integer().
--type command  () :: _.
--type delta    () :: _.
--type reply    () :: _.
--type log_entry() :: {raft_term(), raft_rpc:request_id(), delta()}.
--type handler  () :: mg_utils:mod_opts().
+-type raft_term    () :: non_neg_integer().
+-type index        () :: non_neg_integer().
+-type command      () :: _.
+-type delta        () :: _.
+-type maybe_delta  () :: delta() | undefined.
+-type reply        () :: _.
+-type log_entry    () :: {raft_term(), raft_rpc:request_id(), delta()}.
+-type handler      () :: raft_utils:mod_opts().
 -type handler_state() :: _.
 -type reply_action () :: {reply, reply()} | noreply.
 
@@ -109,11 +112,14 @@
 -callback init(_) ->
     handler_state().
 
+-callback handle_election(_, handler_state()) ->
+    maybe_delta().
+
 -callback handle_async_command(_, raft_rpc:request_id(), command(), handler_state()) ->
     reply_action().
 
 -callback handle_command(_, raft_rpc:request_id(), command(), handler_state()) ->
-    {reply_action(), delta() | undefined}.
+    {reply_action(), maybe_delta()}.
 
 -callback apply_delta(_, raft_rpc:request_id(), delta(), handler_state()) ->
     handler_state().
@@ -123,19 +129,19 @@
 %% Версия без регистрации не имеет смысла (или я не прав? похоже, что прав, работа по пидам смысла не имеет).
 %% А как же общение по RPC? Тут похоже обратное — версия с регистрацией не нужна
 %% (но нужно всё-таки как-то зарегистрировать процесс при erl rpc).
--spec start_link(mg_utils:gen_reg_name(), handler(), options()) ->
-    mg_utils:gen_start_ret().
+-spec start_link(raft_utils:gen_reg_name(), handler(), options()) ->
+    raft_utils:gen_start_ret().
 start_link(RegName, Handler, Options) ->
     gen_server:start_link(RegName, ?MODULE, {Handler, Options}, []).
 
 %% TODO sessions
 -spec send_command(raft_rpc:rpc(), [raft_rpc:endpoint()], raft_rpc:request_id() | undefined, command(), genlib_retry:strategy()) ->
-    ok.
+    term().
 send_command(RPC, Cluster, ID, Command, Retry) ->
     send_ext_command(RPC, Cluster, ID, {command, Command}, Retry).
 
 -spec send_async_command(raft_rpc:rpc(), [raft_rpc:endpoint()], raft_rpc:request_id() | undefined, command(), genlib_retry:strategy()) ->
-    ok.
+    term().
 send_async_command(RPC, Cluster, ID, Command, Retry) ->
     send_ext_command(RPC, Cluster, ID, {command, Command}, Retry).
 
@@ -230,7 +236,7 @@ recv_response_command(RPC, ID, Timeout) ->
 }.
 
 -spec init(_) ->
-    mg_utils:gen_server_init_ret(state()).
+    raft_utils:gen_server_init_ret(state()).
 init(Args) ->
     NewState = new_state(Args),
     {ok, NewState, get_timer_timeout(NewState)}.
@@ -238,18 +244,18 @@ init(Args) ->
 %%
 %% Calls
 %%
--spec handle_call(_Call, mg_utils:gen_server_from(), state()) ->
-    mg_utils:gen_server_handle_call_ret(state()).
+-spec handle_call(_Call, raft_utils:gen_server_from(), state()) ->
+    raft_utils:gen_server_handle_call_ret(state()).
 handle_call(_, _From, State) ->
     {noreply, State, get_timer_timeout(State)}.
 
 -spec handle_cast(_, state()) ->
-    mg_utils:gen_server_handle_cast_ret(state()).
+    raft_utils:gen_server_handle_cast_ret(state()).
 handle_cast(_, State) ->
     {noreply, State, get_timer_timeout(State)}.
 
 -spec handle_info(_Info, state()) ->
-    mg_utils:gen_server_handle_info_ret(state()).
+    raft_utils:gen_server_handle_info_ret(state()).
 handle_info(timeout, State) ->
     NewState = handle_timeout(State),
     ok = log_timeout(State, NewState),
@@ -261,7 +267,7 @@ handle_info({raft_rpc, From, Data}, State = #{options := #{rpc := RPC}}) ->
     {noreply, NewState, get_timer_timeout(NewState)}.
 
 -spec code_change(_, state(), _) ->
-    mg_utils:gen_server_code_change_ret(state()).
+    raft_utils:gen_server_code_change_ret(state()).
 code_change(_, State, _) ->
     {ok, State}.
 
@@ -498,7 +504,7 @@ new_follower_state(State) ->
 -spec append_command(raft_rpc:request_id(), raft_rpc:endpoint(), command(), state()) ->
     state().
 append_command(ID, From, Command, State = #{commands := Commands}) ->
-    State#{commands := [{ID, From, Command}|Commands]}.
+    State#{commands := lists:keystore(ID, 3, Commands, {ID, From, Command})}.
 
 %%
 %% role changing
@@ -540,7 +546,7 @@ become_leader(State = #{role := {candidate, _}}) -> become_leader_(State).
 -spec become_leader_(state()) ->
     state().
 become_leader_(State) ->
-    try_send_append_entries(set_role({leader, new_followers_state(State)}, State)).
+    try_send_append_entries(handler_handle_election(set_role({leader, new_followers_state(State)}, State))).
 
 -spec set_role(role(), state()) ->
     state().
@@ -813,16 +819,6 @@ append_log_entries(PrevIndex, Entries, State) ->
 last_log_entry(State) ->
     storage_get_one(log, last_log_index(State), State).
 
-% -spec find_in_log_by_id(raft_rpc:request_id(), state()) ->
-%     log_entry() | undefined.
-% find_in_log_by_id(ID, State) ->
-%     case storage_get_one(cmd_id, ID, State) of
-%         undefined ->
-%             undefined;
-%         LogIndex ->
-%             {LogIndex, log_entry(LogIndex, State)}
-%     end.
-
 -spec set_default(undefined | Value, Value) ->
     Value.
 set_default(undefined, Default) ->
@@ -856,7 +852,18 @@ storage_get_one(Type, Key, #{options := #{storage := Storage}, storage_states :=
 -spec handler_init(handler()) ->
     handler_state().
 handler_init(Handler) ->
-    mg_utils:apply_mod_opts(Handler, init, []).
+    raft_utils:apply_mod_opts(Handler, init, []).
+
+-spec handler_handle_election(state()) ->
+    state().
+handler_handle_election(State = #{handler := Handler, handler_state := HandlerState, current_term := CurrentTerm}) ->
+    case raft_utils:apply_mod_opts(Handler, handle_election, [HandlerState]) of
+        undefined ->
+            State;
+        Delta ->
+            % TODO подумать про request_id
+            append_log_entries(last_log_index(State), [{CurrentTerm, undefined, Delta}], State)
+    end.
 
 %%
 %% исполняется на лидере, может сгенерить изменение стейта — дельту
@@ -868,7 +875,7 @@ handler_init(Handler) ->
 -spec handler_handle_command(raft_rpc:request_id(), raft_rpc:endpoint(), command(), state()) ->
     state().
 handler_handle_command(ID, From, Command, State = #{handler := Handler, handler_state := HandlerState, current_term := CurrentTerm}) ->
-    {Reply, Delta} = mg_utils:apply_mod_opts(Handler, handle_command, [ID, Command, HandlerState]),
+    {Reply, Delta} = raft_utils:apply_mod_opts(Handler, handle_command, [ID, Command, HandlerState]),
     case Delta of
         undefined ->
             ok = send_reply(From, ID, Reply, State),
@@ -881,14 +888,14 @@ handler_handle_command(ID, From, Command, State = #{handler := Handler, handler_
 -spec handler_handle_async_command(raft_rpc:endpoint(), raft_rpc:request_id(), command(), state()) ->
     state().
 handler_handle_async_command(From, ID, Command, State = #{handler := Handler, handler_state := HandlerState}) ->
-    Reply = mg_utils:apply_mod_opts(Handler, handle_async_command, [ID, Command, HandlerState]),
+    Reply = raft_utils:apply_mod_opts(Handler, handle_async_command, [ID, Command, HandlerState]),
     ok = send_reply(From, ID, Reply, State),
     State.
 
 -spec handler_apply_delta(raft_rpc:request_id(), delta(), state()) ->
     state().
 handler_apply_delta(ID, Delta, State = #{handler := Handler, handler_state := HandlerState}) ->
-    NewHandlerState = mg_utils:apply_mod_opts(Handler, apply_delta, [ID, Delta, HandlerState]),
+    NewHandlerState = raft_utils:apply_mod_opts(Handler, apply_delta, [ID, Delta, HandlerState]),
     State#{handler_state := NewHandlerState}.
 
 %%

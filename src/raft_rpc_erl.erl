@@ -4,7 +4,7 @@
 -behaviour(raft_rpc).
 -export([send/4, recv/2, get_nearest/2, get_reply_endpoint/1]).
 
--type endpoint() :: mg_utils:gen_ref().
+-type endpoint() :: raft_utils:gen_ref().
 
 %% this is a copy of gen_server:cast
 -spec send(_, endpoint(), endpoint(), raft_rpc:message()) ->
@@ -33,7 +33,7 @@ get_nearest(_, Endpoints) ->
         {ok, Local} ->
             Local;
         false ->
-            mg_utils:lists_random(Endpoints)
+            raft_utils:lists_random(Endpoints)
     end.
 
 -spec get_reply_endpoint(_) ->
@@ -58,7 +58,7 @@ find_local([H|T]) ->
 is_local(Ref) ->
     try
         % а нет ли более простого варианта?
-        erlang:node(mg_utils:gen_where(Ref)) =:= node()
+        erlang:node(raft_utils:gen_where(Ref)) =:= node()
     catch error:badarg ->
         false
     end.

@@ -22,14 +22,14 @@
     socket_options := [gen_sctp:option()]
 }.
 -type peer() :: {inet:ip_address(), inet:port_number()}.
--type endpoint() :: {peer(), mg_utils:gen_ref()}. % TODO node() вместо peer() (можно попробовать сделать резолвинг)
+-type endpoint() :: {peer(), raft_utils:gen_ref()}. % TODO node() вместо peer() (можно попробовать сделать резолвинг)
 
--spec start_link(mg_utils:gen_reg_name(), options()) ->
-    mg_utils:gen_start_ret().
+-spec start_link(raft_utils:gen_reg_name(), options()) ->
+    raft_utils:gen_start_ret().
 start_link(RegName, Options) ->
     gen_server:start_link(RegName, ?MODULE, Options, []).
 
--spec send(mg_utils:gen_ref(), endpoint(), endpoint(), raft_rpc:message()) ->
+-spec send(raft_utils:gen_ref(), endpoint(), endpoint(), raft_rpc:message()) ->
     ok.
 send(Ref, From, To, Message) ->
     % TODO возможена перегрузка!!!
@@ -40,7 +40,7 @@ send(Ref, From, To, Message) ->
 %%
 -type association() ::
       {connected, association_connected()}
-    | {connecting, Buffer::#{mg_utils:gen_ref() => {endpoint(), raft_rpc:message()}}}
+    | {connecting, Buffer::#{raft_utils:gen_ref() => {endpoint(), raft_rpc:message()}}}
     |  disconnected
 .
 -type association_connected() :: gen_sctp:assoc_id().
@@ -53,7 +53,7 @@ send(Ref, From, To, Message) ->
 
 
 -spec init(options()) ->
-    mg_utils:gen_server_init_ret(state()).
+    raft_utils:gen_server_init_ret(state()).
 init(Options = #{port := Port, ip := IP, socket_options := SocketOptions}) ->
     % при передаче несколько раз одной опции с разными значениями используется первая в списке
     % поэтому тут те опции, от которых зависит логика работы находятся в самом начале
@@ -76,14 +76,14 @@ init(Options = #{port := Port, ip := IP, socket_options := SocketOptions}) ->
         },
     {ok, ready_for_recv(State)}.
 
--spec handle_call(_Call, mg_utils:gen_server_from(), state()) ->
-    mg_utils:gen_server_handle_call_ret(state()).
+-spec handle_call(_Call, raft_utils:gen_server_from(), state()) ->
+    raft_utils:gen_server_handle_call_ret(state()).
 handle_call(Call, From, State) ->
     ok = error_logger:error_msg("unexpected gen_server call received: ~p from ~p", [Call, From]),
     {noreply, State}.
 
 -spec handle_cast(_, state()) ->
-    mg_utils:gen_server_handle_cast_ret(state()).
+    raft_utils:gen_server_handle_cast_ret(state()).
 handle_cast({send, From, {SCTPEndpoint, Ref}, Message}, State) ->
     ToSend = {Ref, From, Message},
     NewAssociation =
@@ -99,14 +99,14 @@ handle_cast({send, From, {SCTPEndpoint, Ref}, Message}, State) ->
     {noreply, update_association(SCTPEndpoint, NewAssociation, State)}.
 
 -spec handle_info(_Info, state()) ->
-    mg_utils:gen_server_handle_info_ret(state()).
+    raft_utils:gen_server_handle_info_ret(state()).
 handle_info({sctp, S, IP, Port, Data}, State = #{socket := S}) ->
     SCTPEndpoint = {IP, Port},
     NewAssociation = handle_association_event(get_accociation(SCTPEndpoint, State), Data, State),
     {noreply, ready_for_recv(update_association(SCTPEndpoint, NewAssociation, State))}.
 
 -spec code_change(_, state(), _) ->
-    mg_utils:gen_server_code_change_ret(state()).
+    raft_utils:gen_server_code_change_ret(state()).
 code_change(_, State, _) ->
     {ok, State}.
 
@@ -166,7 +166,7 @@ handle_association_event({connected, _}, {_, {sctp_shutdown_event, _}}, _) ->
     association_disconnected();
 handle_association_event(Association = {connected, _}, {_, Data}, _) ->
     {Ref, From, Message} = erlang:binary_to_term(Data),
-    _ = (catch mg_utils:gen_send(Ref, {raft_rpc, From, Message})),
+    _ = (catch raft_utils:gen_send(Ref, {raft_rpc, From, Message})),
     Association.
 
 %%
@@ -190,12 +190,12 @@ association_connect({IP, Port}, #{socket := Socket}) ->
     end,
     {connecting, #{}}.
 
--spec append_to_connecting_buffer({mg_utils:gen_ref(), endpoint(), raft_rpc:message()}, association()) ->
+-spec append_to_connecting_buffer({raft_utils:gen_ref(), endpoint(), raft_rpc:message()}, association()) ->
     association().
 append_to_connecting_buffer({To, From, Message}, {connecting, Buffer}) ->
     {connecting, Buffer#{To => {From, Message}}}.
 
--spec do_send_all([{mg_utils:gen_ref(), endpoint(), raft_rpc:message()}], association(), state()) ->
+-spec do_send_all([{raft_utils:gen_ref(), endpoint(), raft_rpc:message()}], association(), state()) ->
     ok.
 do_send_all(Messages, Association, State) ->
     ok = lists:foreach(
@@ -205,7 +205,7 @@ do_send_all(Messages, Association, State) ->
             lists:reverse(Messages)
         ).
 
--spec do_send({mg_utils:gen_ref(), endpoint(), raft_rpc:message()}, association(), state()) ->
+-spec do_send({raft_utils:gen_ref(), endpoint(), raft_rpc:message()}, association(), state()) ->
     ok.
 do_send({Ref, From, Message}, {connected, Association}, #{socket := Socket}) ->
     case gen_sctp:send(Socket, Association, 0, erlang:term_to_binary({Ref, From, Message})) of

@@ -2,7 +2,7 @@
 %%% То, чего не хватает в OTP.
 %%% TODO перенести в genlib
 %%%
--module(mg_utils).
+-module(raft_utils).
 
 %% API
 %% OTP

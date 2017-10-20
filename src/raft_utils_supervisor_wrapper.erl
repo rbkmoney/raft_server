@@ -1,4 +1,4 @@
--module(mg_utils_supervisor_wrapper).
+-module(raft_utils_supervisor_wrapper).
 
 %% API
 -export([start_link/2]).
@@ -10,12 +10,12 @@
 
 %% API
 -spec start_link(supervisor:sup_flags(), [supervisor:child_spec()]) ->
-    mg_utils:gen_start_ret().
+    raft_utils:gen_start_ret().
 start_link(Flags, ChildsSpecs) ->
     supervisor:start_link(?MODULE, {Flags, ChildsSpecs}).
 
--spec start_link(mg_utils:gen_reg_name(), supervisor:sup_flags(), [supervisor:child_spec()]) ->
-    mg_utils:gen_start_ret().
+-spec start_link(raft_utils:gen_reg_name(), supervisor:sup_flags(), [supervisor:child_spec()]) ->
+    raft_utils:gen_start_ret().
 start_link(RegName, Flags, ChildsSpecs) ->
     supervisor:start_link(RegName, ?MODULE, {Flags, ChildsSpecs}).
 
@@ -23,6 +23,6 @@ start_link(RegName, Flags, ChildsSpecs) ->
 %% supervisor callbacks
 %%
 -spec init({supervisor:sup_flags(), [supervisor:child_spec()]}) ->
-    mg_utils:supervisor_ret().
+    raft_utils:supervisor_ret().
 init({Flags, ChildsSpecs}) ->
     {ok, {Flags, ChildsSpecs}}.

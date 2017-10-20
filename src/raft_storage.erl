@@ -18,7 +18,7 @@
 -type key    () :: term().
 -type value  () :: term().
 -type state  () :: term().
--type storage() :: mg_utils:mod_opts().
+-type storage() :: raft_utils:mod_opts().
 
 %%
 
@@ -42,24 +42,24 @@
 -spec init(storage(), type()) ->
     state().
 init(Storage, Type) ->
-    mg_utils:apply_mod_opts(Storage, init, [Type]).
+    raft_utils:apply_mod_opts(Storage, init, [Type]).
 
 -spec put(storage(), [{key(), value()}], state()) ->
     state().
 put(Storage, Values, State) ->
-    mg_utils:apply_mod_opts(Storage, put, [Values, State]).
+    raft_utils:apply_mod_opts(Storage, put, [Values, State]).
 
 -spec get(storage(), [key()], state()) ->
     [value()].
 get(Storage, Keys, State) ->
-    mg_utils:apply_mod_opts(Storage, get, [Keys, State]).
+    raft_utils:apply_mod_opts(Storage, get, [Keys, State]).
 
 -spec get_one(storage(), key(), state()) ->
     value().
 get_one(Storage, Key, State) ->
-    mg_utils:apply_mod_opts(Storage, get_one, [Key, State]).
+    raft_utils:apply_mod_opts(Storage, get_one, [Key, State]).
 
 -spec remove(storage(), [key()], state()) ->
     state().
 remove(Storage, Keys, State) ->
-    mg_utils:apply_mod_opts(Storage, remove, [Keys, State]).
+    raft_utils:apply_mod_opts(Storage, remove, [Keys, State]).

@@ -25,7 +25,7 @@
 %%
 %% API
 %%
--type rpc() :: mg_utils:mod_opts().
+-type rpc() :: raft_utils:mod_opts().
 -type endpoint() :: term().
 -type request_id() :: term(). % mb integer?
 -type message() ::
@@ -73,25 +73,25 @@
 
 %%
 
--spec send(mg_utils:mod_opts(), endpoint(), endpoint(), message()) ->
+-spec send(raft_utils:mod_opts(), endpoint(), endpoint(), message()) ->
     ok.
 send(RPC, From, To, Message) ->
-    mg_utils:apply_mod_opts(RPC, send, [From, To, Message]).
+    raft_utils:apply_mod_opts(RPC, send, [From, To, Message]).
 
--spec recv(mg_utils:mod_opts(), _) ->
+-spec recv(raft_utils:mod_opts(), _) ->
     message().
 recv(RPC, Data) ->
-    mg_utils:apply_mod_opts(RPC, recv, [Data]).
+    raft_utils:apply_mod_opts(RPC, recv, [Data]).
 
--spec get_nearest(mg_utils:mod_opts(), [endpoint()]) ->
+-spec get_nearest(raft_utils:mod_opts(), [endpoint()]) ->
     endpoint().
 get_nearest(RPC, Endpoints) ->
-    mg_utils:apply_mod_opts(RPC, get_nearest, [Endpoints]).
+    raft_utils:apply_mod_opts(RPC, get_nearest, [Endpoints]).
 
--spec get_reply_endpoint(mg_utils:mod_opts()) ->
+-spec get_reply_endpoint(raft_utils:mod_opts()) ->
     endpoint().
 get_reply_endpoint(RPC) ->
-    mg_utils:apply_mod_opts(RPC, get_reply_endpoint, []).
+    raft_utils:apply_mod_opts(RPC, get_reply_endpoint, []).
 
 %% TODO callback
 -spec format_endpoint(endpoint()) ->
