@@ -22,9 +22,6 @@
 -behaviour(raft).
 -export([init/1, handle_election/2, handle_command/4, handle_async_command/4, apply_delta/4]).
 
-%% raft_logger
--behaviour(raft_logger).
--export([log/4]).
 
 -export([start_rpc_ /2]).
 -export([start_raft_/3]).
@@ -228,7 +225,7 @@ raft_options(RPC, Cluster, Self) ->
         broadcast_timeout => BroadcastTimeout,
         storage           => raft_storage_memory,
         rpc               => rpc_mod_opts(RPC, Self),
-        logger            => ?MODULE
+        logger            => raft_logger_io_plant_uml
     }.
 
 
@@ -396,32 +393,3 @@ handle_command(_, _, {write_value, Value}, State) ->
     state().
 apply_delta(_, _, Value, _) ->
     Value.
-
-
-
-%%
-%% logger
-%%
-%% хочется больше эвентов в seq_dia и чтобы они были в одном файле
-%%  - название теста
-%%  - создание/удаление элементов
-%%  - шедулинг таймера
-
-% рендер http://www.plantuml.com/plantuml/uml/
--spec log(_, raft_logger:event(), raft:state(), raft:state()) ->
-    ok.
-log(_, timeout, StateBefore, StateAfter) ->
-    io:format("->\"~s\" : timeout~n~s", [raft:format_self_endpoint(StateBefore), format_state_transition(StateBefore, StateAfter)]);
-log(_, {incoming_message, From, Message}, StateBefore, StateAfter) ->
-    io:format("\"~s\"->\"~s\" : ~s~n~s",
-        [raft_rpc:format_endpoint(From), raft:format_self_endpoint(StateBefore),
-            raft_rpc:format_message(Message), format_state_transition(StateBefore, StateAfter)]);
-log(_, {incoming_message, Message}, StateBefore, StateAfter) ->
-    io:format("->\"~s\" : ~s~n~s",
-        [raft:format_self_endpoint(StateBefore), raft_rpc:format_message(Message), format_state_transition(StateBefore, StateAfter)]).
-
--spec format_state_transition(raft:state(), raft:state()) ->
-    ok.
-format_state_transition(StateBefore, StateAfter) ->
-    io_lib:format("note left of \"~s\"~n\t~s~n\t~s~nend note",
-        [raft:format_self_endpoint(StateBefore), raft:format_state(StateBefore), raft:format_state(StateAfter)]).
