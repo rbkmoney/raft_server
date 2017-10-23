@@ -29,13 +29,13 @@ start_link(RaftRegName, SupRegName, RaftOptions) ->
         #{strategy => one_for_all},
         [
             #{
-                id       => sup,
-                start    => {supervisor, start_link, [SupRegName, {#{strategy => one_for_one}, []}]},
+                id       => supervisor,
+                start    => {raft_utils_supervisor_wrapper, start_link, [SupRegName, #{strategy => one_for_one}, []]},
                 restart  => permanent,
                 type     => supervisor
             },
             #{
-                id       => sup,
+                id       => raft_server,
                 start    => {raft, start_link, [RaftRegName, {?MODULE, gen_reg_name_to_ref(SupRegName)}, RaftOptions]},
                 restart  => permanent,
                 type     => worker
