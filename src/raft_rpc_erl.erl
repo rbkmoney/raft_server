@@ -4,22 +4,26 @@
 -behaviour(raft_rpc).
 -export([send/4, recv/2, get_nearest/2, get_reply_endpoint/1]).
 
--type endpoint() :: raft_utils:gen_ref().
+-type endpoint() ::
+      raft_utils:gen_ref()
+    | {node(), term()} % for testing
+.
 
-%% this is a copy of gen_server:cast
 -spec send(_, endpoint(), endpoint(), raft_rpc:message()) ->
     ok.
-send(_, From, To, Message) ->
+send(Options, From, To, Message) ->
     FullMessage = {raft_rpc, From, Message},
-    ok = case To of
+    _ = case To of
             {global, GlobalName} ->
                 catch global:send(GlobalName, FullMessage);
             {via, Mod, Name} ->
                 catch Mod:send(Name, FullMessage);
-            LocalName ->
-                _ = (catch erlang:send(LocalName, FullMessage)),
-                ok
-        end.
+            {Name, Node} when is_atom(Node) andalso not is_atom(Name) ->
+                erlang:spawn(Node, ?MODULE, send, [Options, From, Name, Message]);
+            LocalNameOrPid ->
+                catch erlang:send(LocalNameOrPid, FullMessage)
+        end,
+    ok.
 
 -spec recv(_, term()) ->
     raft_rpc:message().
@@ -55,10 +59,12 @@ find_local([H|T]) ->
 
 -spec is_local(endpoint()) ->
     boolean().
+is_local({Name, Node}) when is_atom(Node) andalso not is_atom(Name) ->
+    Node =:= erlang:node();
 is_local(Ref) ->
     try
         % а нет ли более простого варианта?
-        erlang:node(raft_utils:gen_where(Ref)) =:= node()
+        erlang:node(raft_utils:gen_where(Ref)) =:= erlang:node()
     catch error:badarg ->
         false
     end.
