@@ -8,6 +8,7 @@
 %%% TODO:
 %%%  - обязательное:
 %%%   - workers и супервизор
+%%%   - ответить всем
 %%%  - доработки:
 %%%   - сделать регистрацию в RPC
 %%%   - убрать gen_server и переделать на proc_lib
@@ -16,7 +17,6 @@
 %%%   - ресайз кластера
 %%%   - msgpack для сериализации
 %%%   - асинхронная обработка запроса с чеком лидерства
-%%%   - рефакторинг и причёсывание
 %%%   - сессия обращения
 %%%   - добавить handle_info
 %%%   - лимит на длинну очереди команд
@@ -144,7 +144,7 @@ send_command(RPC, Cluster, ID, Command, Retry) ->
 -spec send_async_command(raft_rpc:rpc(), [raft_rpc:endpoint()], raft_rpc:request_id() | undefined, command(), genlib_retry:strategy()) ->
     term().
 send_async_command(RPC, Cluster, ID, Command, Retry) ->
-    send_ext_command(RPC, Cluster, ID, {command, Command}, Retry).
+    send_ext_command(RPC, Cluster, ID, {async_command, Command}, Retry).
 
 %%
 
