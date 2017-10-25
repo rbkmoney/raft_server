@@ -7,7 +7,7 @@
 
 %% raft
 -behaviour(raft).
--export([init/1, handle_election/2, handle_command/4, handle_async_command/4, apply_delta/4]).
+-export([init/1, handle_election/2, handle_command/4, handle_async_command/4, handle_info/3, apply_delta/4]).
 
 %%
 %% API
@@ -66,6 +66,11 @@ handle_async_command(_, _, async_command, state) ->
     {raft:reply_action(), delta() | undefined, state()}.
 handle_command(_, _, sync_command, state) ->
     {{reply, ok}, delta, state}.
+
+-spec handle_info(_, _Info, state()) ->
+    {undefined, state()}.
+handle_info(_, _Info, state) ->
+    {undefined, state}.
 
 -spec apply_delta(_, raft_rpc:request_id(), delta(), state()) ->
     state().

@@ -23,7 +23,7 @@ log(_, {incoming_message, Message}, StateBefore, StateAfter) ->
         [raft:format_self_endpoint(StateBefore), raft_rpc:format_message(Message), format_state_transition(StateBefore, StateAfter)]).
 
 -spec format_state_transition(raft:state(), raft:state()) ->
-    ok.
+    list().
 format_state_transition(StateBefore, StateAfter) ->
     io_lib:format("note left of \"~s\"~n\t~s~n\t~s~nend note",
         [raft:format_self_endpoint(StateBefore), raft:format_state(StateBefore), raft:format_state(StateAfter)]).

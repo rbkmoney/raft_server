@@ -20,7 +20,7 @@
 
 %% raft
 -behaviour(raft).
--export([init/1, handle_election/2, handle_command/4, handle_async_command/4, apply_delta/4]).
+-export([init/1, handle_election/2, handle_command/4, handle_async_command/4, handle_info/3, apply_delta/4]).
 
 
 -export([start_rpc_ /2]).
@@ -388,6 +388,12 @@ handle_command(_, _, read_value, State) ->
     {{reply, State}, undefined, State};
 handle_command(_, _, {write_value, Value}, State) ->
     {{reply, ok}, Value, State}.
+
+-spec handle_info(_, _Info, state()) ->
+    {undefined, state()}.
+handle_info(_, Info, State) ->
+    ok = error_logger:error_msg("unexpected info received: ~p", [Info]),
+    {undefined, State}.
 
 -spec apply_delta(_, raft_rpc:request_id(), delta(), state()) ->
     state().

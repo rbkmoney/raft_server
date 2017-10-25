@@ -17,7 +17,7 @@
 
 %% raft
 -behaviour(raft).
--export([init/1, handle_election/2, handle_command/4, handle_async_command/4, apply_delta/4]).
+-export([init/1, handle_election/2, handle_command/4, handle_async_command/4, handle_info/3, apply_delta/4]).
 
 %%
 %% API
@@ -135,6 +135,12 @@ handle_command(SupRef, _, {stop_child, ID}, State) ->
             {{reply, Error}, undefined, State}
     end.
 
+-spec handle_info(_, _Info, state()) ->
+    {undefined, state()}.
+handle_info(_, Info, State) ->
+    ok = error_logger:error_msg("unexpected info received: ~p", [Info]),
+    {undefined, State}.
+
 -spec apply_delta(raft_utils:gen_ref(), raft_rpc:request_id(), delta(), state()) ->
     state().
 apply_delta(SupRef, _, {start_child, ChildSpec}, State) ->
@@ -142,7 +148,7 @@ apply_delta(SupRef, _, {start_child, ChildSpec}, State) ->
     State;
 apply_delta(SupRef, _, {stop_child, ID}, State) ->
     ok = supervisor:terminate_child(SupRef, ID),
-    ok = supervisor:delete_child(SupRef, ID),
+    ok = supervisor:delete_child   (SupRef, ID),
     State.
 
 %%
