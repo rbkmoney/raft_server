@@ -1,4 +1,4 @@
--module(raft_utils_supervisor_wrapper).
+-module(supervisor_wrapper).
 
 %% API
 -export([start_link/2]).

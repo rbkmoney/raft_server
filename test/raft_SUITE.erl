@@ -193,7 +193,7 @@ start_raft_sup() ->
                 type     => worker
             }
         ],
-    raft_utils:throw_if_error(raft_utils_supervisor_wrapper:start_link({local, raft_sup}, Flags, ChildsSpecs)).
+    raft_utils:throw_if_error(supervisor_wrapper:start_link({local, raft_sup}, Flags, ChildsSpecs)).
 
 -spec start_raft(rpc_config(), cluster_config (), name()) ->
     pid().
@@ -256,7 +256,7 @@ start_rpc_sup() ->
                 type     => worker
             }
         ],
-    raft_utils:throw_if_error(raft_utils_supervisor_wrapper:start_link({local, rpc_sup}, Flags, ChildsSpecs)).
+    raft_utils:throw_if_error(supervisor_wrapper:start_link({local, rpc_sup}, Flags, ChildsSpecs)).
 
 -spec start_rpc(rpc_config(), cluster_config ()) ->
     ok.
