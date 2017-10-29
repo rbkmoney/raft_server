@@ -1,4 +1,20 @@
 %%%
+%%% Copyright 2017 RBKmoney
+%%%
+%%% Licensed under the Apache License, Version 2.0 (the "License");
+%%% you may not use this file except in compliance with the License.
+%%% You may obtain a copy of the License at
+%%%
+%%%     http://www.apache.org/licenses/LICENSE-2.0
+%%%
+%%% Unless required by applicable law or agreed to in writing, software
+%%% distributed under the License is distributed on an "AS IS" BASIS,
+%%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%%% See the License for the specific language governing permissions and
+%%% limitations under the License.
+%%%
+
+%%%
 %%% Основная идея в том, чтобы сделать максимально лёгкую в стиле OTP реализацию Raft.
 %%% В процессе написания была попытка усидеть на 3х стульях сразу:
 %%%  - с одной стороны по максимуму придерживаться терминологии орининального документа (https://raft.github.io/raft.pdf);
@@ -12,13 +28,13 @@
 %%%   - сделать регистрацию в RPC
 %%%   - убрать gen_server и переделать на proc_lib
 %%%   - timeout на хендлер
+%%%   - привести в порядок таймауты запросов к кластеру
+%%%   - лимит на длинну очереди команд
 %%%   - компактизация стейта и оптимизация наливки свежего елемента группы
-%%%   - ресайз кластера
-%%%   - msgpack для сериализации
+%%%   - внешние сериализаторы для rpc и msgpack реализация
 %%%   - асинхронная обработка запроса с чеком лидерства
 %%%   - сессия обращения
-%%%   - лимит на длинну очереди команд
-%%%   - привести в порядок таймауты запросов к кластеру
+%%%   - ресайз кластера
 %%%   -
 %%%  - проблемы:
 %%%   - нет проверки лидерства при обработке команды
@@ -27,10 +43,12 @@
 %%%   - не удалять последующие элементы лога если нет конфликта
 %%%   - упадёт когда лидеру придёт ответ на append_entries с новым термом (эпохой)
 %%%   - нет проверки lastLog при отдаче голоса
+%%%   - нет обработки потери лидерства (а такое возможно)
 %%%   -
 %%%  - рефакторинг:
 %%%   - вынести отдельно raft_rpc_server и переименовать в raft_server
 %%%   - переделать работу со storage (и придумать как, но то, что есть — хрень :-\ )
+%%%   - убрать raft_utils и перенести всё в genlib
 %%%
 -module(raft).
 
