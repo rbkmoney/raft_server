@@ -37,47 +37,58 @@ start_link(RegName, RaftOptions) ->
 
 -spec get(raft:options(), _Key) ->
     {ok, _Value} | {error, not_found}.
-get(#{rpc := RPC, cluster := Cluster}, Key) ->
+get(Options = #{rpc := RPC, cluster := Cluster}, Key) ->
     raft:send_command(
         RPC,
         Cluster,
         undefined,
         {get, Key},
-        genlib_retry:linear(10, 100)
+        retry(Options)
     ).
 
 -spec get_dirty(raft:options(), _Key) ->
     {ok, _Value} | {error, not_found}.
-get_dirty(#{rpc := RPC, cluster := Cluster}, Key) ->
+get_dirty(Options = #{rpc := RPC, cluster := Cluster}, Key) ->
     raft:send_async_command(
         RPC,
         Cluster,
         undefined,
         {get, Key},
-        genlib_retry:linear(10, 100)
+        retry(Options)
     ).
 
 -spec put(raft:options(), _Key, _Value) ->
     ok.
-put(#{rpc := RPC, cluster := Cluster}, Key, Value) ->
+put(Options = #{rpc := RPC, cluster := Cluster}, Key, Value) ->
     raft:send_command(
         RPC,
         Cluster,
         undefined,
         {put, Key, Value},
-        genlib_retry:linear(10, 100)
+        retry(Options)
     ).
 
 -spec remove(raft:options(), _Key) ->
     ok.
-remove(#{rpc := RPC, cluster := Cluster}, Key) ->
+remove(Options = #{rpc := RPC, cluster := Cluster}, Key) ->
     raft:send_command(
         RPC,
         Cluster,
         undefined,
         {remove, Key},
-        genlib_retry:linear(10, 100)
+        retry(Options)
     ).
+
+-spec retry(raft:options()) ->
+    genlib_retry:strategy().
+retry(#{election_timeout := ElectionTimeout, broadcast_timeout := BroadcastTimeout}) ->
+    Timeout =
+        case ElectionTimeout of
+            {_, V} -> V;
+            V      -> V
+        end,
+    genlib_retry:linear({max_total_timeout, Timeout * 2}, BroadcastTimeout).
+
 
 %%
 %% raft
