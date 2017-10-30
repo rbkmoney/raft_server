@@ -490,7 +490,7 @@ try_commit(IndexN, CommitIndex, State = #{current_term := CurrentTerm}) ->
     case IndexN > CommitIndex andalso get_term_from_log(IndexN, State) =:= CurrentTerm of
         true ->
             case is_replicated(IndexN, State) of
-                true  -> try_apply_commited(send_last_reply(commit(IndexN, State)));
+                true  -> send_last_reply(commit(IndexN, State));
                 false -> try_commit(IndexN - 1, CommitIndex, State)
             end;
         false ->
@@ -787,11 +787,11 @@ randomize_timeout(Const) ->
 -spec commit(index(), state()) ->
     state().
 commit(Index, State) ->
-    set_commit_index(Index, State).
+    try_apply_commited(set_commit_index(Index, State)).
 
 -spec try_apply_commited(state()) ->
     state().
-try_apply_commited(State = #{role := {leader, _}}) ->
+try_apply_commited(State = #{role := _}) ->
     LastApplied = last_applied(State),
     case LastApplied < commit_index(State) of
         true ->
@@ -808,16 +808,16 @@ apply_commited(Index, State) ->
 
 -spec try_handle_next_command(state()) ->
     state().
-try_handle_next_command(State = #{commands := []}) ->
-    State;
-try_handle_next_command(State = #{commands := [NextRequest|RemainRequests]}) ->
+try_handle_next_command(State = #{commands := [NextRequest|RemainRequests], role := {leader, _}}) ->
     case last_log_index(State) =:= commit_index(State) of
         true ->
             {ID, From, Command} = NextRequest,
             handler_handle_command(ID, From, Command, State#{commands := RemainRequests});
         false ->
             State
-    end.
+    end;
+try_handle_next_command(State) ->
+    State.
 
 -spec last_applied(state()) ->
     index().
