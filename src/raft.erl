@@ -41,7 +41,6 @@
 %%%   - репликация команды из прошлой эпохи
 %%%   - неправильная работа с next/match index
 %%%   - не удалять последующие элементы лога если нет конфликта
-%%%   - упадёт когда лидеру придёт ответ на append_entries с новым термом (эпохой)
 %%%   - нет обработки потери лидерства (а такое возможно)
 %%%   -
 %%%  - рефакторинг:
@@ -445,7 +444,10 @@ handle_rpc_response(append_entries, From, Succeed, State = #{role := {leader, Fo
             match_index = NewMatchIndex,
             rpc_timeout = 0
         },
-    try_send_append_entries(try_commit(update_leader_follower(From, NewFollowerState, State))).
+    try_send_append_entries(try_commit(update_leader_follower(From, NewFollowerState, State)));
+handle_rpc_response(append_entries, _, _, State = #{role := _}) ->
+    % что-то уже устаревшее
+    State.
 
 %%
 
