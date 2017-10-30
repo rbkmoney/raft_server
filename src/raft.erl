@@ -42,7 +42,6 @@
 %%%   - неправильная работа с next/match index
 %%%   - не удалять последующие элементы лога если нет конфликта
 %%%   - упадёт когда лидеру придёт ответ на append_entries с новым термом (эпохой)
-%%%   - нет проверки lastLog при отдаче голоса
 %%%   - нет обработки потери лидерства (а такое возможно)
 %%%   -
 %%%  - рефакторинг:
@@ -395,9 +394,17 @@ handle_internal_rpc(From, {response, Type, Succeed, _}, State) ->
 
 -spec handle_rpc_request(raft_rpc:internal_message_type(), raft_rpc:message_body(), raft_rpc:endpoint(), state()) ->
     {boolean(), state()}.
-handle_rpc_request(request_vote, _, Candidate, State = #{role := {follower, undefined}}) ->
-    % Голосую!
-    {true, schedule_election_timer(update_follower(Candidate, State))};
+handle_rpc_request(request_vote, {ReqLastLogIndex, ReqLastLogTerm}, Candidate, State = #{role := {follower, undefined}}) ->
+    MyLastLogIndex = last_log_index(State),
+    MyLastLogTerm  = get_term_from_log(MyLastLogIndex, State),
+    case MyLastLogTerm =< ReqLastLogTerm andalso MyLastLogIndex =< ReqLastLogIndex of
+        true ->
+            % Голосую!
+            {true, schedule_election_timer(update_follower(Candidate, State))};
+        false ->
+            % Вы слишком стары для меня!
+            {false, State}
+    end;
 handle_rpc_request(request_vote, _, _, State = #{role := _}) ->
     % Извините, я уже проголосовал. :-\
     {false, State};
