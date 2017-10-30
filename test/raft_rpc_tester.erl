@@ -17,11 +17,11 @@
 -module(raft_rpc_tester).
 
 %% API
--export([start_link   /1]).
+-export([start_link   /0]).
 % -export([remove_route /3]).
 % -export([add_delay    /4]).
--export([split        /3]).
--export([restore      /1]).
+-export([split        /2]).
+-export([restore      /0]).
 
 %% gen_server callbacks
 -behaviour(gen_server).
@@ -38,20 +38,20 @@
 
 -type options() :: {raft_utils:gen_ref(), endpoint()}.
 
--spec start_link(raft_utils:gen_reg_name()) ->
+-spec start_link() ->
     raft_utils:gen_start_ret().
-start_link(RegName) ->
-    gen_server:start_link(RegName, ?MODULE, undefined, []).
+start_link() ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, undefined, []).
 
--spec split(raft_utils:gen_ref(), [endpoint()], [endpoint()]) ->
+-spec split([endpoint()], [endpoint()]) ->
     ok.
-split(Ref, PartA, PartB) ->
-    gen_server:call(Ref, {split, PartA, PartB}).
+split(PartA, PartB) ->
+    gen_server:call(?MODULE, {split, PartA, PartB}).
 
--spec restore(raft_utils:gen_ref()) ->
+-spec restore() ->
     ok.
-restore(Ref) ->
-    gen_server:call(Ref, restore).
+restore() ->
+    gen_server:call(?MODULE, restore).
 
 
 %%
@@ -62,14 +62,14 @@ restore(Ref) ->
     % | {delay, N}
 .
 -type state() :: #{
-    bad_links := #{{From::endpoint(), To::endpoint()} => link_problem()}
+    bad_links := atom() | ets:tid()
 }.
 
 -spec init(_) ->
     raft_utils:gen_server_init_ret(state()).
 init(_) ->
     State = #{
-        bad_links => #{}
+        bad_links => ets:new(?MODULE, [bag, protected, named_table, {read_concurrency, true}])
     },
     {ok, State}.
 
@@ -84,9 +84,6 @@ handle_call(_, _From, State) ->
 
 -spec handle_cast(_, state()) ->
     raft_utils:gen_server_handle_cast_ret(state()).
-handle_cast({send, From, To, Message}, State) ->
-    ok = do_send(From, To, Message, State),
-    {noreply, State};
 handle_cast(_, State) ->
     {noreply, State}.
 
@@ -110,8 +107,13 @@ terminate(_, _) ->
 %%
 -spec send(options(), endpoint(), endpoint(), raft_rpc:message()) ->
     ok.
-send({TesterRef, _}, From, To, Message) ->
-    gen_server:cast(TesterRef, {send, From, To, Message}).
+send(_, From, To, Message) ->
+    case get_connectivity(From, To) of
+        normal ->
+            raft_rpc_erl:send(undefined, From, To, Message);
+        broken ->
+            ok
+    end.
 
 -spec recv(options(), term()) ->
     raft_rpc:message().
@@ -120,7 +122,7 @@ recv(_, Message) ->
 
 -spec get_nearest(options(), [endpoint()]) ->
     endpoint().
-get_nearest({_, Self}, Endpoints) ->
+get_nearest(Self, Endpoints) ->
     case lists:member(Self, Endpoints) of
         true  -> Self;
         false -> raft_utils:lists_random(Endpoints)
@@ -133,39 +135,30 @@ get_reply_endpoint(_) ->
 
 %%
 
+-spec get_connectivity(endpoint(), endpoint()) ->
+    link_problem() | normal.
+get_connectivity(From, To) ->
+    case ets:lookup(?MODULE, {From, To}) of
+        [            ] -> normal;
+        [{_, Problem}] -> Problem
+    end.
+
 -spec do_split([endpoint()], [endpoint()], state()) ->
     state().
 do_split(PartA, PartB, State) ->
-    lists:foldl(
-        fun add_bad_link/2,
-        State,
-        [{From, To} || From <- PartA, To <- PartB] ++
-        [{From, To} || From <- PartB, To <- PartA]
-    ).
+    BadLinks =
+        [{{From, To}, broken} || From <- PartA, To <- PartB] ++
+        [{{From, To}, broken} || From <- PartB, To <- PartA],
+    add_bad_links(BadLinks, State).
 
--spec add_bad_link({endpoint(), endpoint()}, state()) ->
+-spec add_bad_links([{{endpoint(), endpoint()}, link_problem()}], state()) ->
     state().
-add_bad_link({From, To}, State = #{bad_links := BadLinks}) ->
-    State#{bad_links := maps:put({From, To}, broken, BadLinks)}.
+add_bad_links(BadLinks, State) ->
+    true = ets:insert(?MODULE, BadLinks),
+    State.
 
 -spec do_restore(state()) ->
     state().
 do_restore(State) ->
-    State#{bad_links := #{}}.
-
-
--spec do_send(endpoint(), endpoint(), raft_rpc:message(), state()) ->
-    ok.
-do_send(From, To, Message, State) ->
-    case get_connectivity(From, To, State) of
-        normal ->
-            raft_rpc_erl:send(undefined, From, To, Message);
-        broken ->
-            ok
-    end.
-
--spec get_connectivity(endpoint(), endpoint(), state()) ->
-    link_problem() | normal.
-get_connectivity(From, To, #{bad_links := BadLinks}) ->
-    maps:get({From, To}, BadLinks, normal).
-
+    true = ets:delete_all_objects(?MODULE),
+    State.

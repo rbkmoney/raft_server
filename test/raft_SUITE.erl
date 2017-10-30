@@ -60,7 +60,7 @@ init_per_suite(C) ->
     {ok, Apps} = application:ensure_all_started(raft),
 
     % dbg:tracer(), dbg:p(all, c),
-    % dbg:tpl({raft, send_response_command, '_'}, x),
+    % dbg:tpl({raft, 'schedule_election_timer', '_'}, x),
     % dbg:tpl({?MODULE, handle_sync_command, '_'}, x),
 
     [
@@ -81,32 +81,35 @@ end_per_suite(C) ->
     _.
 base_test(C) ->
     Cluster = [Self|_] = ?config(cluster, C),
-    Key = key,
-    Value = value,
     Options = raft_options(Cluster, Self),
     _ = start_cluster(Cluster),
-    _ = read_not_found(Options, Key),
-    _ = write_success(Options, Key, Value),
-    _ = read_success(Options, Key, Value),
+    _ = read_not_found(Options, key),
+    _ = write_success(Options, key, value),
+    _ = read_success(Options, key, value),
     % [erlang:exit(raft_utils:gen_where(Name), kill) || Name <- ['3', '4', '5']],
-    _ = remove_successfull(Options, Key),
-    _ = read_not_found(Options, Key).
+    _ = remove_successfull(Options, key),
+    _ = read_not_found(Options, key).
 
 -spec cluster_simple_split_test(config()) ->
     _.
 cluster_simple_split_test(C) ->
     Cluster = [Self|_] = ?config(cluster, C),
-    Key = key,
-    Value = value,
     Options = raft_options(Cluster, Self),
     _ = start_cluster(Cluster),
-    _ = write_success(Options, Key, Value),
-    ok = raft_rpc_tester:split(rpc_tester, ['1', '2', '3'], ['4', '5']),
-    _ = write_success(Options, Key, Value),
-    % TODO тест по факту не работает, нужно доделывать
-    % _ = write_fail(raft_options(['5'], '5'), Key, bad_value),
-    ok = raft_rpc_tester:restore(rpc_tester),
-    _ = read_success(Options, Key, Value).
+    _ = write_success(Options, key, value0),
+    % не успевает отреплицироваться
+    ok = raft_rpc_tester:split(['1', '2', '3'], ['4', '5']),
+
+    % ждём пока отвалившаяся группа потеряет лидера
+    ok = timer:sleep(80),
+    _ = write_success(raft_options(['1'], '1'), key, value1),
+    _ = write_fail(raft_options(['5'], '5'), key, bad_value),
+    ok = raft_rpc_tester:restore(),
+
+    % ждём пока соединится
+    ok = timer:sleep(80),
+    _ = read_success(raft_options(['5'], '5'), key, value1),
+    _ = read_success(raft_options(['1'], '1'), key, value1).
 
 -spec read_not_found(raft:options(), _Key) ->
     _.
@@ -140,7 +143,7 @@ remove_successfull(Options, Key) ->
 -spec start_cluster(cluster()) ->
     _.
 start_cluster(Cluster) ->
-    _ = raft_utils:throw_if_error(raft_rpc_tester:start_link({local, rpc_tester})),
+    _ = raft_utils:throw_if_error(raft_rpc_tester:start_link()),
     _ = start_cluster_sup(),
     [start_server(Cluster, Self) || Self <- Cluster].
 
@@ -181,13 +184,28 @@ start_server_(Cluster, Name) ->
 -spec raft_options(cluster(), name()) ->
     raft:options().
 raft_options(Cluster, Self) ->
+    N = lists_index(Self, Cluster),
     #{
         self              => Self,
         cluster           => Cluster,
-        election_timeout  => {50, 100},
+        election_timeout  => {20, 40},
         broadcast_timeout => 10,
         storage           => raft_storage_memory,
-        rpc               => {raft_rpc_tester, {rpc_tester, Self}},
-        % rpc               => raft_rpc_erl,
-        logger            => raft_logger_io_plant_uml
+        rpc               => {raft_rpc_tester, Self},
+        logger            => raft_logger_io_plant_uml,
+        random_seed       => {0, N, N * 10}
     }.
+
+-spec lists_index(_V, []) ->
+    pos_integer() | undefined.
+lists_index(V, L) ->
+    lists_index(V, L, 1).
+
+-spec lists_index(_V, [], pos_integer()) ->
+    pos_integer() | undefined.
+lists_index(_, [], _) ->
+    undefined;
+lists_index(V, [V | _], N) ->
+    N;
+lists_index(V, [_ | L], N) ->
+    lists_index(V, L, N + 1).
