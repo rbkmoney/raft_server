@@ -102,7 +102,9 @@
     rpc               => raft_rpc:rpc(),
 
     % логгирование эвентов
-    logger            => raft_logger:logger()
+    logger            => raft_logger:logger(),
+
+    random_seed       := {integer(), integer(), integer()} | undefined
 }.
 
 -type raft_term    () :: non_neg_integer().
@@ -257,10 +259,11 @@ recv_response_command(RPC, ID, Timeout) ->
     reply => {raft_rpc:endpoint(), raft_rpc:request_id(), reply()} | undefined
 }.
 
--spec init(_) ->
+-spec init({handler(), options()}) ->
     raft_utils:gen_server_init_ret(state()).
-init(Args) ->
+init(Args = {_, Options}) ->
     NewState = new_state(Args),
+    ok = random_seed(Options),
     {ok, NewState, get_timer_timeout(NewState)}.
 
 %%
@@ -328,6 +331,16 @@ init_storage(#{storage := Storage}) ->
         system  => raft_storage:init(Storage, system),
         log     => raft_storage:init(Storage, log   )
     }.
+
+-spec random_seed(options()) ->
+    ok.
+random_seed(Options) ->
+    Algo = exsplus,
+    case maps:get(random_seed, Options, undefined) of
+        undefined -> rand:seed(Algo);
+        Seed      -> rand:seed(Algo, Seed)
+    end,
+    ok.
 
 -spec handle_timeout(state()) ->
     state().
