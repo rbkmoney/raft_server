@@ -82,20 +82,21 @@ end_per_suite(C) ->
 base_test(C) ->
     Cluster = [Self|_] = ?config(cluster, C),
     Options = raft_options(Cluster, Self),
-    _ = start_cluster(Cluster),
+    Pids = start_cluster(Cluster),
     _ = read_not_found(Options, key),
     _ = write_success(Options, key, value),
     _ = read_success(Options, key, value),
-    % [erlang:exit(raft_utils:gen_where(Name), kill) || Name <- ['3', '4', '5']],
+    [erlang:exit(raft_utils:gen_where_ref(Name), kill) || Name <- ['4', '5']],
     _ = remove_successfull(Options, key),
-    _ = read_not_found(Options, key).
+    _ = read_not_found(Options, key),
+    stop_cluster(Pids).
 
 -spec cluster_simple_split_test(config()) ->
     _.
 cluster_simple_split_test(C) ->
     Cluster = [Self|_] = ?config(cluster, C),
     Options = raft_options(Cluster, Self),
-    _ = start_cluster(Cluster),
+    Pids = start_cluster(Cluster),
     _ = write_success(Options, key, value0),
     % не успевает отреплицироваться
     ok = raft_rpc_tester:split(['1', '2', '3'], ['4', '5']),
@@ -109,7 +110,9 @@ cluster_simple_split_test(C) ->
     % ждём пока соединится
     ok = timer:sleep(18),
     _ = read_success(raft_options(['5'], '5'), key, value1),
-    _ = read_success(raft_options(['1'], '1'), key, value1).
+    _ = read_success(raft_options(['1'], '1'), key, value1),
+    ok = stop_cluster(Pids),
+    ok.
 
 -spec read_not_found(raft_server:options(), _Key) ->
     _.
@@ -141,11 +144,17 @@ remove_successfull(Options, Key) ->
 %% raft cluster
 %%
 -spec start_cluster(cluster()) ->
-    _.
+    [pid()].
 start_cluster(Cluster) ->
-    _ = raft_utils:throw_if_error(raft_rpc_tester:start_link()),
-    _ = start_cluster_sup(),
-    [start_server(Cluster, Self) || Self <- Cluster].
+    TesterPid = raft_utils:throw_if_error(raft_rpc_tester:start_link()),
+    ClusterSupPid = start_cluster_sup(),
+    [start_server(Cluster, Self) || Self <- Cluster],
+    [TesterPid, ClusterSupPid].
+
+-spec stop_cluster([]) ->
+    ok.
+stop_cluster(Pids) ->
+    raft_utils:stop_wait_all(Pids, shutdown, 5000).
 
 -spec start_cluster_sup() ->
     pid().
@@ -156,7 +165,7 @@ start_cluster_sup() ->
             #{
                 id       => raft,
                 start    => {?MODULE, start_server_, []},
-                shutdown => brutal_kill,
+                % shutdown => brutal_kill,
                 restart  => temporary,
                 type     => worker
             }

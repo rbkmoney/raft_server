@@ -50,6 +50,7 @@
 
 -opaque state() :: #{
     parent        := pid(),
+    reg_name      := raft_utils:gen_reg_name(),
     options       := options(),
     handler       := handler(),
     handler_state := handler_state(),
@@ -103,6 +104,7 @@ format_self_endpoint(State) ->
 init(Parent, RegName, Handler, Options) ->
     State = #{
         parent        => Parent,
+        reg_name      => RegName,
         options       => Options,
         handler       => Handler,
         handler_state => undefined,
@@ -129,6 +131,7 @@ register(RegName) ->
 -spec loop(state()) ->
     no_return().
 loop(State = #{parent := Parent}) ->
+    process_flag(trap_exit, true),
     Timeout = get_timer_timeout(State),
     receive
         {raft_rpc, From, Message} ->
@@ -137,6 +140,8 @@ loop(State = #{parent := Parent}) ->
             loop(NewState);
         {system, From, Request} ->
             sys:handle_system_msg(Request, From, Parent, ?MODULE, [], State);
+        {'EXIT', Parent, Reason} ->
+            terminate(Reason, State);
         Info ->
             loop(call_handler_handle_info(Info, State))
     after Timeout ->
@@ -160,8 +165,44 @@ system_continue(_, _, State) ->
 
 -spec system_terminate(_Reason, pid(), _Debug, state()) ->
     no_return().
-system_terminate(Reason, _, _, _) ->
+system_terminate(Reason, _, _, State) ->
+    terminate(Reason, State).
+
+-spec terminate(_Reason, state()) ->
+    no_return().
+terminate(Reason, State) ->
+    ok = log_error(Reason, State),
     exit(Reason).
+
+-spec log_error(_Reason, state()) ->
+    ok.
+log_error(Reason, State = #{reg_name := RegName}) ->
+    case terminate_status(Reason) of
+        ok ->
+            ok;
+        error ->
+            ok = error_logger:format(
+                "** Raft server ~tp terminating~n"
+                "** When Server state == ~ts~n"
+                "** Reason for termination == ~n"
+                "** ~tp~n", [RegName, format_state_safe(State), Reason])
+    end.
+
+-spec format_state_safe(state()) ->
+    list().
+format_state_safe(State = #{handler_state := HandlerState}) ->
+    try
+        call_handler_format_state(State)
+    catch _:_ ->
+        io_lib:format("~tp", [HandlerState])
+    end.
+
+-spec
+terminate_status(_Reason     ) -> ok | error.
+terminate_status(normal      ) -> ok;
+terminate_status(shutdown    ) -> ok;
+terminate_status({shutdown,_}) -> ok;
+terminate_status(_           ) -> error.
 
 %%
 %% handler
@@ -189,7 +230,7 @@ call_handler_handle_info(Info, State = #{timer := Timer, handler_state := Handle
 -spec call_handler_format_state(state()) ->
     list().
 call_handler_format_state(#{handler := Handler, handler_state := HandlerState}) ->
-   raft_utils:apply_mod_opts(Handler, format_state, [HandlerState]).
+    raft_utils:apply_mod_opts(Handler, format_state, [HandlerState]).
 
 -spec call_handler_format_self_endpoint(state()) ->
     list().
@@ -199,17 +240,22 @@ call_handler_format_self_endpoint(#{handler := Handler, handler_state := Handler
 -spec call_handler(atom(), list(), state()) ->
     state().
 call_handler(Fun, Args, State = #{handler := Handler, options := #{rpc := RPC}}) ->
-    {MessagesToSend, NewTimer, NewHandlerState} =raft_utils:apply_mod_opts(Handler, Fun, Args),
-    ok = lists:foreach(
-            fun({From, To, Message}) ->
-                raft_rpc:send(RPC, From, To, Message)
-            end,
-            MessagesToSend
-        ),
-    State#{
-        timer         => NewTimer,
-        handler_state => NewHandlerState
-    }.
+    try
+        {MessagesToSend, NewTimer, NewHandlerState} =
+            raft_utils:apply_mod_opts(Handler, Fun, Args),
+        ok = lists:foreach(
+                fun({From, To, Message}) ->
+                    raft_rpc:send(RPC, From, To, Message)
+                end,
+                MessagesToSend
+            ),
+        State#{
+            timer         => NewTimer,
+            handler_state => NewHandlerState
+        }
+    catch Class:Reason ->
+        terminate({'handler exception', {Class, Reason, erlang:get_stacktrace()}}, State)
+    end.
 
 %%
 %% logging

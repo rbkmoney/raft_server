@@ -389,7 +389,7 @@ stop_wait_all(Pids, Reason, Timeout) ->
         fun(Pid) ->
             case stop_wait(Pid, Reason, Timeout) of
                 ok      -> ok;
-                timeout -> exit(stop_timeout)
+                timeout -> exit({timeout, {?MODULE, stop_wait_all, [Pids, Reason, Timeout]}})
             end
         end,
         Pids
