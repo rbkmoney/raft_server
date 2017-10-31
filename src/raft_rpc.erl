@@ -78,9 +78,6 @@
 -callback send(_, endpoint(), endpoint(), message()) ->
     ok.
 
--callback recv(_, _Data) ->
-    message().
-
 -callback get_nearest(_, [endpoint()]) ->
     endpoint().
 
@@ -94,10 +91,17 @@
 send(RPC, From, To, Message) ->
     raft_utils:apply_mod_opts(RPC, send, [From, To, Message]).
 
--spec recv(raft_utils:mod_opts(), _) ->
-    message().
-recv(RPC, Data) ->
-    raft_utils:apply_mod_opts(RPC, recv, [Data]).
+-spec recv(raft_utils:mod_opts(), timeout()) ->
+    {ok, endpoint(), message()} | timeout.
+recv(_RPC, Timeout) ->
+    receive
+        {raft_rpc, From, Message} ->
+            % TODO
+            % ok = log_incoming_message(Options, From, Message)
+            {ok, From, Message}
+    after Timeout ->
+        timeout
+    end.
 
 -spec get_nearest(raft_utils:mod_opts(), [endpoint()]) ->
     endpoint().

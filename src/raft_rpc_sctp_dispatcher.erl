@@ -33,7 +33,7 @@
 %% API
 %%
 -type options() :: #{
-    port := inet:port(),                          % порт интерконнекта на котором работает данный элемент кластера
+    port := inet:port_number(),                          % порт интерконнекта на котором работает данный элемент кластера
     ip   := inet:ip_address() | any | loopback,   % исходящий интерфейс
     socket_options := [gen_sctp:option()]
 }.

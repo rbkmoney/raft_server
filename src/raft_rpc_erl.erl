@@ -18,7 +18,7 @@
 
 %% raft_rpc
 -behaviour(raft_rpc).
--export([send/4, recv/2, get_nearest/2, get_reply_endpoint/1]).
+-export([send/4, get_nearest/2, get_reply_endpoint/1]).
 
 -type endpoint() ::
       raft_utils:gen_ref()
@@ -40,11 +40,6 @@ send(Options, From, To, Message) ->
                 catch erlang:send(LocalNameOrPid, FullMessage)
         end,
     ok.
-
--spec recv(_, term()) ->
-    raft_rpc:message().
-recv(_, Message) ->
-    Message.
 
 -spec get_nearest(_, [endpoint()]) ->
     endpoint().

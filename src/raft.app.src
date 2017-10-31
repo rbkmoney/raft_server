@@ -20,7 +20,8 @@
     {registered, []},
     {applications, [
         kernel,
-        stdlib
+        stdlib,
+        genlib
     ]},
     {env, []},
     {modules, []},

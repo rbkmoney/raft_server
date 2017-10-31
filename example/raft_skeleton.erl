@@ -21,22 +21,22 @@
 -export([sync_command /1]).
 -export([async_command/1]).
 
-%% raft
--behaviour(raft).
+%% raft_server
+-behaviour(raft_server).
 -export([init/1, handle_election/2, handle_command/4, handle_async_command/4, handle_info/3, apply_delta/4]).
 
 %%
 %% API
 %%
--spec start_link(raft_utils:gen_reg_name(), raft:options()) ->
+-spec start_link(raft_utils:gen_reg_name(), raft_server:options()) ->
     raft_utils:gen_start_ret().
 start_link(RegName, RaftOptions) ->
-    raft:start_link(RegName, ?MODULE, RaftOptions).
+    raft_server:start_link(RegName, ?MODULE, RaftOptions).
 
--spec sync_command(raft:options()) ->
+-spec sync_command(raft_server:options()) ->
     ok.
 sync_command(#{rpc := RPC, cluster := Cluster}) ->
-    raft:send_command(
+    raft_server:send_command(
         RPC,
         Cluster,
         undefined,
@@ -44,10 +44,10 @@ sync_command(#{rpc := RPC, cluster := Cluster}) ->
         genlib_retry:linear(10, 100)
     ).
 
--spec async_command(raft:options()) ->
+-spec async_command(raft_server:options()) ->
     ok.
 async_command(#{rpc := RPC, cluster := Cluster}) ->
-    raft:send_async_command(
+    raft_server:send_async_command(
         RPC,
         Cluster,
         undefined,
@@ -56,7 +56,7 @@ async_command(#{rpc := RPC, cluster := Cluster}) ->
     ).
 
 %%
-%% raft
+%% raft_server
 %%
 -type async_command() :: async_command.
 -type sync_command () :: sync_command.
@@ -74,12 +74,12 @@ handle_election(_, state) ->
     {undefined, state}.
 
 -spec handle_async_command(_, raft_rpc:request_id(), async_command(), state()) ->
-    {raft:reply_action(), state()}.
+    {raft_server:reply_action(), state()}.
 handle_async_command(_, _, async_command, state) ->
     {{reply, ok}, state}.
 
 -spec handle_command(raft_utils:gen_ref(), raft_rpc:request_id(), sync_command(), state()) ->
-    {raft:reply_action(), delta() | undefined, state()}.
+    {raft_server:reply_action(), delta() | undefined, state()}.
 handle_command(_, _, sync_command, state) ->
     {{reply, ok}, delta, state}.
 

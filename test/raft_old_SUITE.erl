@@ -34,8 +34,8 @@
 -export([test_write_read      /1]).
 -export([sleep                /1]).
 
-%% raft
--behaviour(raft).
+%% raft_server
+-behaviour(raft_server).
 -export([init/1, handle_election/2, handle_command/4, handle_async_command/4, handle_info/3, apply_delta/4]).
 
 
@@ -113,7 +113,7 @@ init_per_suite(C) ->
     {ok, Apps} = application:ensure_all_started(raft),
 
     % dbg:tracer(), dbg:p(all, c),
-    % dbg:tpl({raft, send_response_command, '_'}, x),
+    % dbg:tpl({raft_server, send_response_command, '_'}, x),
     % dbg:tpl({?MODULE, handle_sync_command, '_'}, x),
 
     [
@@ -224,14 +224,14 @@ start_raft(RPC, Cluster, Name) ->
 -spec start_raft_(rpc_config(), cluster_config (), name()) ->
     raft_utils:gen_start_ret().
 start_raft_(RPC, Cluster, Name) ->
-    raft:start_link(
+    raft_server:start_link(
         {local, Name},
         ?MODULE,
         raft_options(RPC, Cluster, Name)
     ).
 
 -spec raft_options(rpc_config(), cluster_config (), name()) ->
-    raft:options().
+    raft_server:options().
 raft_options(RPC, Cluster, Self) ->
     {ElectionTimeout, BroadcastTimeout} = raft_timeouts(RPC),
     #{
@@ -241,7 +241,7 @@ raft_options(RPC, Cluster, Self) ->
         broadcast_timeout => BroadcastTimeout,
         storage           => raft_storage_memory,
         rpc               => rpc_mod_opts(RPC, Self),
-        logger            => raft_logger_io_plant_uml
+        logger            => raft_rpc_logger_io_plant_uml
     }.
 
 
@@ -340,7 +340,7 @@ sctp_name_to_port(d     ) -> 4;
 sctp_name_to_port(e     ) -> 5.
 
 %%
-%% raft
+%% raft_server
 %%
 -type command() :: read_value | get_leader | {write_value, _}.
 
@@ -368,7 +368,7 @@ kill_leader(RPCConfig, ClusterConfig) ->
 -spec send_command(rpc_config(), cluster_config(), _Call) ->
     _.
 send_command(RPCConfig, ClusterConfig, Command) ->
-    raft:send_command(
+    raft_server:send_command(
         rpc_mod_opts(RPCConfig, a),
         cluster(RPCConfig, ClusterConfig),
         undefined,
@@ -391,13 +391,13 @@ handle_election(_, State) ->
     {undefined, State}.
 
 -spec handle_async_command(_, raft_rpc:request_id(), command(), state()) ->
-    {raft:reply_action(), state()}.
+    {raft_server:reply_action(), state()}.
 handle_async_command(_, _, _, State) ->
     _ = exit(1),
     {noreply, State}.
 
 -spec handle_command(_, raft_rpc:request_id(), command(), state()) ->
-    {raft:reply_action(), delta() | undefined, state()}.
+    {raft_server:reply_action(), delta() | undefined, state()}.
 handle_command(_, _, get_leader, State) ->
     {{reply, erlang:self()}, undefined, State};
 handle_command(_, _, read_value, State) ->

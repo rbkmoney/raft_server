@@ -23,22 +23,22 @@
 -export([put       /3]).
 -export([remove    /2]).
 
-%% raft
--behaviour(raft).
+%% raft_server
+-behaviour(raft_server).
 -export([init/1, handle_election/2, handle_command/4, handle_async_command/4, handle_info/3, apply_delta/4]).
 
 %%
 %% API
 %%
--spec start_link(raft_utils:gen_reg_name(), raft:options()) ->
+-spec start_link(raft_utils:gen_reg_name(), raft_server:options()) ->
     raft_utils:gen_start_ret().
 start_link(RegName, RaftOptions) ->
-    raft:start_link(RegName, ?MODULE, RaftOptions).
+    raft_server:start_link(RegName, ?MODULE, RaftOptions).
 
--spec get(raft:options(), _Key) ->
+-spec get(raft_server:options(), _Key) ->
     {ok, _Value} | {error, not_found}.
 get(Options = #{rpc := RPC, cluster := Cluster}, Key) ->
-    raft:send_command(
+    raft_server:send_command(
         RPC,
         Cluster,
         undefined,
@@ -46,10 +46,10 @@ get(Options = #{rpc := RPC, cluster := Cluster}, Key) ->
         retry(Options)
     ).
 
--spec get_dirty(raft:options(), _Key) ->
+-spec get_dirty(raft_server:options(), _Key) ->
     {ok, _Value} | {error, not_found}.
 get_dirty(Options = #{rpc := RPC, cluster := Cluster}, Key) ->
-    raft:send_async_command(
+    raft_server:send_async_command(
         RPC,
         Cluster,
         undefined,
@@ -57,10 +57,10 @@ get_dirty(Options = #{rpc := RPC, cluster := Cluster}, Key) ->
         retry(Options)
     ).
 
--spec put(raft:options(), _Key, _Value) ->
+-spec put(raft_server:options(), _Key, _Value) ->
     ok.
 put(Options = #{rpc := RPC, cluster := Cluster}, Key, Value) ->
-    raft:send_command(
+    raft_server:send_command(
         RPC,
         Cluster,
         undefined,
@@ -68,10 +68,10 @@ put(Options = #{rpc := RPC, cluster := Cluster}, Key, Value) ->
         retry(Options)
     ).
 
--spec remove(raft:options(), _Key) ->
+-spec remove(raft_server:options(), _Key) ->
     ok.
 remove(Options = #{rpc := RPC, cluster := Cluster}, Key) ->
-    raft:send_command(
+    raft_server:send_command(
         RPC,
         Cluster,
         undefined,
@@ -79,7 +79,7 @@ remove(Options = #{rpc := RPC, cluster := Cluster}, Key) ->
         retry(Options)
     ).
 
--spec retry(raft:options()) ->
+-spec retry(raft_server:options()) ->
     genlib_retry:strategy().
 retry(#{election_timeout := ElectionTimeout, broadcast_timeout := BroadcastTimeout}) ->
     Timeout =
@@ -91,7 +91,7 @@ retry(#{election_timeout := ElectionTimeout, broadcast_timeout := BroadcastTimeo
 
 
 %%
-%% raft
+%% raft_server
 %%
 -type read_command() :: {get, _Key}.
 -type write_command() :: {put, _Key, _Value} | {remove, _Key}.
@@ -111,12 +111,12 @@ handle_election(_, State) ->
     {undefined, State}.
 
 -spec handle_async_command(_, raft_rpc:request_id(), async_command(), state()) ->
-    {raft:reply_action(), state()}.
+    {raft_server:reply_action(), state()}.
 handle_async_command(_, _, {get, Key}, State) ->
     {reply, do_get(Key, State), State}.
 
 -spec handle_command(raft_utils:gen_ref(), raft_rpc:request_id(), sync_command(), state()) ->
-    {raft:reply_action(), delta() | undefined, state()}.
+    {raft_server:reply_action(), delta() | undefined, state()}.
 handle_command(_, _, {get, Key}, State) ->
     {{reply, do_get(Key, State)}, undefined, State};
 handle_command(_, _, Put = {put, _, _}, State) ->

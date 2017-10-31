@@ -14,7 +14,7 @@
 %%% limitations under the License.
 %%%
 
--module(raft_logger).
+-module(raft_rpc_logger).
 
 -export_type([logger/0]).
 -export_type([event /0]).
@@ -25,10 +25,10 @@
       timeout
     | {incoming_message, raft_rpc:endpoint(), raft_rpc:message()}.
 
--callback log(_, event(), Before::raft:state(), After::raft:state()) ->
+-callback log(_, event(), Before::raft_rpc_server:state(), After::raft_rpc_server:state()) ->
     ok.
 
--spec log(logger(), event(), Before::raft:state(), After::raft:state()) ->
+-spec log(logger(), event(), raft_rpc_server:state(), raft_rpc_server:state()) ->
     ok.
 log(undefined, _, _, _) ->
     ok;

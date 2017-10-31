@@ -29,7 +29,7 @@
 
 %% raft_rpc
 -behaviour(raft_rpc).
--export([send/4, recv/2, get_nearest/2, get_reply_endpoint/1]).
+-export([send/4, get_nearest/2, get_reply_endpoint/1]).
 
 %%
 %% API
@@ -54,12 +54,6 @@ send({SelfPeer, _}, From, {ToPeer, Ref}, Message) when SelfPeer =:= ToPeer ->
     ok;
 send({_, DispatcherRef}, From, To, Message) ->
     ok = raft_rpc_sctp_dispatcher:send(DispatcherRef, From, To, Message).
-
--spec recv({peer(), raft_utils:gen_ref()}, term()) ->
-    raft_rpc:message().
-recv(_, Message) ->
-    Message.
-
 
 -spec get_nearest({peer(), raft_utils:gen_ref()}, [endpoint()]) ->
     endpoint().

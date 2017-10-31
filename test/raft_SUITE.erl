@@ -111,27 +111,27 @@ cluster_simple_split_test(C) ->
     _ = read_success(raft_options(['5'], '5'), key, value1),
     _ = read_success(raft_options(['1'], '1'), key, value1).
 
--spec read_not_found(raft:options(), _Key) ->
+-spec read_not_found(raft_server:options(), _Key) ->
     _.
 read_not_found(Options, Key) ->
     {error, not_found} = raft_kv:get(Options, Key).
 
--spec write_success(raft:options(), _Key, _Value) ->
+-spec write_success(raft_server:options(), _Key, _Value) ->
     _.
 write_success(Options, Key, Value) ->
     ok = raft_kv:put(Options, Key, Value).
 
--spec write_fail(raft:options(), _Key, _Value) ->
+-spec write_fail(raft_server:options(), _Key, _Value) ->
     _.
 write_fail(Options, Key, Value) ->
     {'EXIT', {{timeout, _, _, _}, _}} = (catch raft_kv:put(Options, Key, Value)).
 
--spec read_success(raft:options(), _Key, _Value) ->
+-spec read_success(raft_server:options(), _Key, _Value) ->
     _.
 read_success(Options, Key, Value) ->
     {ok, Value} = raft_kv:get(Options, Key).
 
--spec remove_successfull(raft:options(), _Key) ->
+-spec remove_successfull(raft_server:options(), _Key) ->
     _.
 remove_successfull(Options, Key) ->
     ok = raft_kv:remove(Options, Key).
@@ -182,7 +182,7 @@ start_server_(Cluster, Name) ->
     ).
 
 -spec raft_options(cluster(), name()) ->
-    raft:options().
+    raft_server:options().
 raft_options(Cluster, Self) ->
     N = lists_index(Self, Cluster),
     #{
@@ -192,7 +192,7 @@ raft_options(Cluster, Self) ->
         broadcast_timeout => 10,
         storage           => raft_storage_memory,
         rpc               => {raft_rpc_tester, Self},
-        logger            => raft_logger_io_plant_uml,
+        logger            => raft_rpc_logger_io_plant_uml,
         random_seed       => {0, N, N * 10}
     }.
 
