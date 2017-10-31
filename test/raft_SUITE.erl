@@ -101,13 +101,13 @@ cluster_simple_split_test(C) ->
     ok = raft_rpc_tester:split(['1', '2', '3'], ['4', '5']),
 
     % ждём пока отвалившаяся группа потеряет лидера
-    ok = timer:sleep(80),
+    ok = timer:sleep(18),
     _ = write_success(raft_options(['1'], '1'), key, value1),
     _ = write_fail(raft_options(['5'], '5'), key, bad_value),
     ok = raft_rpc_tester:restore(),
 
     % ждём пока соединится
-    ok = timer:sleep(80),
+    ok = timer:sleep(18),
     _ = read_success(raft_options(['5'], '5'), key, value1),
     _ = read_success(raft_options(['1'], '1'), key, value1).
 
@@ -124,7 +124,7 @@ write_success(Options, Key, Value) ->
 -spec write_fail(raft_server:options(), _Key, _Value) ->
     _.
 write_fail(Options, Key, Value) ->
-    {'EXIT', {{timeout, _, _, _}, _}} = (catch raft_kv:put(Options, Key, Value)).
+    {'EXIT', {timeout, _}} = (catch raft_kv:put(Options, Key, Value)).
 
 -spec read_success(raft_server:options(), _Key, _Value) ->
     _.
@@ -188,8 +188,8 @@ raft_options(Cluster, Self) ->
     #{
         self              => Self,
         cluster           => Cluster,
-        election_timeout  => {20, 40},
-        broadcast_timeout => 10,
+        election_timeout  => {6, 9},
+        broadcast_timeout => 3,
         storage           => raft_storage_memory,
         rpc               => {raft_rpc_tester, Self},
         logger            => raft_rpc_logger_io_plant_uml,

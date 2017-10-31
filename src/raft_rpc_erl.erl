@@ -75,7 +75,7 @@ is_local({Name, Node}) when is_atom(Node) andalso not is_atom(Name) ->
 is_local(Ref) ->
     try
         % а нет ли более простого варианта?
-        erlang:node(raft_utils:gen_where(Ref)) =:= erlang:node()
+        erlang:node(raft_utils:gen_where_ref(Ref)) =:= erlang:node()
     catch error:badarg ->
         false
     end.

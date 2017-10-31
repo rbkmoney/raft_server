@@ -26,9 +26,12 @@
 -export([format_state        /1]).
 -export([format_self_endpoint/1]).
 
-%% gen_server callbacks
--behaviour(gen_server).
--export([init/1, handle_info/2, handle_cast/2, handle_call/3, code_change/3, terminate/2]).
+
+%% internal
+-export([init/4]).
+
+% system callbacks
+-export([system_code_change/4, system_continue/3, system_terminate/4]).
 
 %%
 %% API
@@ -41,15 +44,16 @@
 -type handler_ret  () :: {[{raft_rpc:endpoint(), raft_rpc:message()}], timer(), handler_state()}.
 
 -type options() :: #{
-    rpc      => raft_rpc:rpc(),
-    logger   => raft_rpc_logger:logger()
+    rpc      := raft_rpc:rpc(),
+    logger   := raft_rpc_logger:logger()
 }.
 
 -opaque state() :: #{
-    options       => options(),
-    handler       => handler(),
-    handler_state => handler_state(),
-    timer         => timer()
+    parent        := pid(),
+    options       := options(),
+    handler       := handler(),
+    handler_state := handler_state(),
+    timer         := timer()
 }.
 
 %%
@@ -78,7 +82,8 @@
 -spec start_link(raft_utils:gen_reg_name(), handler(), options()) ->
    raft_utils:gen_start_ret().
 start_link(RegName, Handler, Options) ->
-    gen_server:start_link(RegName, ?MODULE, {Handler, Options}, []).
+    proc_lib:start_link(?MODULE, init, [self(), RegName, Handler, Options]).
+
 
 -spec format_state(state()) ->
     list().
@@ -93,51 +98,70 @@ format_self_endpoint(State) ->
 %%
 %% gen_server callbacks
 %%
--spec init(_) ->
-   raft_utils:gen_server_init_ret(state()).
-init({Handler, Options}) ->
+-spec init(pid(), raft_utils:gen_reg_name(), handler(), options()) ->
+   no_return().
+init(Parent, RegName, Handler, Options) ->
     State = #{
+        parent        => Parent,
         options       => Options,
         handler       => Handler,
         handler_state => undefined,
         timer         => undefined
     },
+    Result = register(RegName),
     NewState = call_handler_init(State),
-    {ok, NewState, get_timer_timeout(NewState)}.
+    ok = proc_lib:init_ack(Parent, Result),
+    case Result of
+        {ok, _} ->
+            loop(NewState);
+        {error, Reason} ->
+            erlang:exit(Reason)
+    end.
 
--spec handle_call(_Call,raft_utils:gen_server_from(), state()) ->
-   raft_utils:gen_server_handle_call_ret(state()).
-handle_call(_, _From, State) ->
-    {noreply, State, get_timer_timeout(State)}.
+-spec register(raft_utils:gen_reg_name()) ->
+    {ok, pid()} | {error, {already_started, pid()}}.
+register(RegName) ->
+    case raft_utils:gen_register_name(RegName) of
+         true        -> {ok   , erlang:self()         };
+        {false, Pid} -> {error, {already_started, Pid}}
+    end.
 
--spec handle_cast(_, state()) ->
-   raft_utils:gen_server_handle_cast_ret(state()).
-handle_cast(_, State) ->
-    {noreply, State, get_timer_timeout(State)}.
+-spec loop(state()) ->
+    no_return().
+loop(State = #{parent := Parent}) ->
+    Timeout = get_timer_timeout(State),
+    receive
+        {raft_rpc, From, Message} ->
+            NewState = call_handler_handle_rpc_message(From, Message, State),
+            ok = log_incoming_message(From, Message, State, NewState),
+            loop(NewState);
+        {system, From, Request} ->
+            sys:handle_system_msg(Request, From, Parent, ?MODULE, [], State);
+        Info ->
+            loop(call_handler_handle_info(Info, State))
+    after Timeout ->
+        NewState = call_handler_handle_timeout(State),
+        ok = log_timeout(State, NewState),
+        loop(NewState)
+    end.
 
--spec handle_info(_Info, state()) ->
-   raft_utils:gen_server_handle_info_ret(state()).
-handle_info(timeout, State) ->
-    NewState = call_handler_handle_timeout(State),
-    ok = log_timeout(State, NewState),
-    {noreply, NewState, get_timer_timeout(NewState)};
-handle_info({raft_rpc, From, Message}, State) ->
-    NewState = call_handler_handle_rpc_message(From, Message, State),
-    ok = log_incoming_message(From, Message, State, NewState),
-    {noreply, NewState, get_timer_timeout(NewState)};
-handle_info(Info, State) ->
-    NewState = call_handler_handle_info(Info, State),
-    {noreply, NewState, get_timer_timeout(NewState)}.
-
--spec code_change(_, state(), _) ->
-   raft_utils:gen_server_code_change_ret(state()).
-code_change(_, State, _) ->
+%%
+%% system callbacks
+%%
+-spec system_code_change(state(), _, _, _) ->
+    {ok, state()}.
+system_code_change(State, _, _, _) ->
     {ok, State}.
 
--spec terminate(_Reason, state()) ->
-    ok.
-terminate(_, _) ->
-    ok.
+-spec system_continue(pid(), _, state()) ->
+    none().
+system_continue(_, _, State) ->
+    loop(State).
+
+-spec system_terminate(_Reason, pid(), _Debug, state()) ->
+    no_return().
+system_terminate(Reason, _, _, _) ->
+    exit(Reason).
 
 %%
 %% handler

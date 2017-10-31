@@ -28,7 +28,6 @@
 %%%   -
 %%%  - доработки:
 %%%   - сделать регистрацию в RPC
-%%%   - убрать gen_server и переделать на proc_lib
 %%%   - timeout на хендлер
 %%%   - привести в порядок таймауты запросов к кластеру
 %%%   - лимит на длинну очереди команд
@@ -199,7 +198,8 @@ send_ext_command(RPC, Cluster, AllCluster, ID, Command, Retry) ->
                     send_ext_command(RPC, Cluster -- [To], AllCluster, ID, Command, NewRetry)
             end;
         finish ->
-            erlang:error({timeout, AllCluster, ID, Command})
+            % TODO initial Retry and fun name
+            erlang:exit({timeout, {?MODULE, send_ext_command, [RPC, AllCluster, ID, Command, Retry]}})
     end.
 
 -spec recv_response_command(raft_rpc:rpc(), raft_rpc:request_id(), timeout()) ->

@@ -34,9 +34,12 @@
 -export_type([gen_server_handle_info_ret/1]).
 -export_type([gen_server_code_change_ret/1]).
 -export_type([supervisor_ret            /0]).
--export([gen_where        /1]).
--export([gen_send         /2]).
--export([get_msg_queue_len/1]).
+-export([gen_where          /1]).
+-export([gen_where_ref      /1]).
+-export([gen_register_name  /1]).
+-export([gen_unregister_name/1]).
+-export([gen_send           /2]).
+-export([get_msg_queue_len  /1]).
 
 %% deadlines
 -export_type([deadline/0]).
@@ -147,18 +150,62 @@
     | {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}
 .
 
--spec gen_where(gen_ref()) ->
+-spec gen_where(gen_reg_name()) ->
     pid() | undefined.
 gen_where({global, Name}) ->
     global:whereis_name(Name);
 gen_where({via, Module, Name}) ->
     Module:whereis_name(Name);
-gen_where(Name) when is_atom(Name) ->
+gen_where({local, Name}) when is_atom(Name) ->
+    erlang:whereis(Name).
+
+-spec gen_where_ref(gen_ref()) ->
+    pid() | undefined.
+gen_where_ref({global, Name}) ->
+    global:whereis_name(Name);
+gen_where_ref({via, Module, Name}) ->
+    Module:whereis_name(Name);
+gen_where_ref(Name) when is_atom(Name) ->
     erlang:whereis(Name);
-gen_where({Node, Name}) when is_atom(Node) andalso is_atom(Name) ->
+gen_where_ref({Node, Name}) when is_atom(Node) andalso is_atom(Name) ->
     exit(todo);
-gen_where(Pid) when is_pid(Pid) ->
+gen_where_ref(Pid) when is_pid(Pid) ->
     Pid.
+
+-spec gen_register_name(gen_reg_name()) ->
+    true | {false, pid()}.
+gen_register_name({local, Name} = LN) ->
+    try register(Name, self()) of
+        true -> true
+    catch
+        error:_ ->
+            {false, gen_where(LN)}
+    end;
+gen_register_name({global, Name} = GN) ->
+    case global:register_name(Name, self()) of
+        yes -> true;
+        no  -> {false, gen_where(GN)}
+    end;
+gen_register_name({via, Module, Name} = GN) ->
+    case Module:register_name(Name, self()) of
+        yes -> true;
+        no  -> {false, gen_where(GN)}
+    end.
+
+-spec gen_unregister_name(gen_reg_name()) ->
+    ok.
+gen_unregister_name({local, Name}) ->
+    try unregister(Name) of
+        _ -> ok
+    catch
+        _:_ -> ok
+    end;
+gen_unregister_name({global, Name}) ->
+    _ = global:unregister_name(Name),
+    ok;
+gen_unregister_name({via, Mod, Name}) ->
+    _ = Mod:unregister_name(Name),
+    ok.
 
 -spec gen_send(gen_ref(), Msg::term()) ->
     ok.
