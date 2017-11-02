@@ -23,7 +23,7 @@
 
 %% raft_server_log callbacks
 -behaviour(raft_server_log).
--export([init/1, entry/3, entries/4, append/4, commit/3]).
+-export([init/1, indexes/2, entry/3, entries/4, append/4, commit/3]).
 
 -type state() :: #{
     commit_index := raft_server_log:maybe_index(),
@@ -34,13 +34,17 @@
 %% raft_server_log callbacks
 %%
 -spec init(_) ->
-    {raft_server_log:maybe_index(), raft_server_log:maybe_index(), state()}.
+    state().
 init(_) ->
-    State = #{
+    #{
         commit_index => 0,
         log_list     => []
-    },
-    {0, 0, State}.
+    }.
+
+-spec indexes(_, state()) ->
+    {raft_server_log:maybe_index(), raft_server_log:maybe_index()}.
+indexes(_, #{commit_index := CommitIndex, log_list := LogList}) ->
+    {erlang:length(LogList), CommitIndex}.
 
 -spec entry(_, raft_server_log:index(), state()) ->
     raft_server_log:entry() | undefined.

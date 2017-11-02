@@ -27,6 +27,7 @@
 -export_type([entry      /0]).
 -export_type([state      /0]).
 -export([init   /1]).
+-export([indexes/2]).
 -export([entry  /3]).
 -export([entries/4]).
 -export([append /4]).
@@ -43,7 +44,10 @@
 %%
 
 -callback init(_) ->
-    {LastLog::maybe_index(), Commit::maybe_index(), state()}.
+    state().
+
+-callback indexes(_, state()) ->
+    {raft_server_log:maybe_index(), raft_server_log:maybe_index()}.
 
 -callback entry(_, index(), state()) ->
     entry() | undefined.
@@ -62,11 +66,15 @@
 %%
 
 -spec init(log()) ->
-    {LastLog::maybe_index(), Commit::maybe_index(), state()}.
+    state().
 init(Log) ->
     raft_utils:apply_mod_opts(Log, init, []).
 
-%%
+-spec indexes(log(), state()) ->
+    {raft_server_log:maybe_index(), raft_server_log:maybe_index()}.
+indexes(Log, State) ->
+    raft_utils:apply_mod_opts(Log, indexes, [State]).
+
 -spec entry(log(), index(), state()) ->
     entry() | undefined.
 entry(Log, Index, State) ->

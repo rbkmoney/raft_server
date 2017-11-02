@@ -47,7 +47,6 @@
 %%%   - распилить и привести в порядок raft_server.erl, больно он большой
 %%%   -
 %%%  - тестирование:
-%%%   - тестовый сторадж
 %%%   - цепи маркова
 %%%   - отдельные тесты для rpc
 %%%   - отдельные тесты для лога
@@ -326,13 +325,14 @@ random_seed(Options) ->
 -spec new_state(handler(), options()) ->
     state().
 new_state(Handler, #{log := Log}) ->
-    {LastLogIndex, CommitIndex, LogState} = log_init(Log),
+    LogState = log_init(Log),
+
     {ApplyIndex, HandlerState} = handler_init(Handler),
     #{
         role             => {follower, undefined},
         current_term     => 0, % will be updated soon
-        last_log_idx     => LastLogIndex,
-        commit_idx       => CommitIndex,
+        last_log_idx     => 0,
+        commit_idx       => 0,
         log_state        => LogState,
         last_applied_idx => ApplyIndex,
         handler_state    => HandlerState,
@@ -343,7 +343,13 @@ new_state(Handler, #{log := Log}) ->
 -spec init_(hstate()) ->
     hstate().
 init_(HState) ->
-    become_follower(update_current_term_from_log(HState)).
+    become_follower(update_current_term_from_log(update_indexes(HState))).
+
+-spec update_indexes(hstate()) ->
+    hstate().
+update_indexes(HState = #{state := State}) ->
+    {LastLogIndex, CommitIndex} = log_indexes(HState),
+    HState#{state := State#{last_log_idx := LastLogIndex, commit_idx := CommitIndex}}.
 
 -spec update_current_term_from_log(hstate()) ->
     hstate().
@@ -848,9 +854,14 @@ last_log_entry(HState = ?last_log_idx(LastLogIndex)) ->
 -define(log(Log, LogState), #{options := #{log := Log}, state := #{log_state := LogState}}).
 
 -spec log_init(raft_server_log:log()) ->
-    {index(), index(), raft_server_log:state()}.
+    raft_server_log:state().
 log_init(Log) ->
     raft_server_log:init(Log).
+
+-spec log_indexes(hstate()) ->
+    {index(), index()}.
+log_indexes(?log(Log, LogState)) ->
+    raft_server_log:indexes(Log, LogState).
 
 -spec log_commit(index(), hstate()) ->
     hstate().

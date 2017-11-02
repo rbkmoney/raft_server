@@ -69,7 +69,7 @@ restore() ->
     raft_utils:gen_server_init_ret(state()).
 init(_) ->
     State = #{
-        bad_links => ets:new(?MODULE, [bag, protected, named_table, {read_concurrency, true}])
+        bad_links => ets:new(?MODULE, [set, protected, named_table, {read_concurrency, true}])
     },
     {ok, State}.
 

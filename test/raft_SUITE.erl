@@ -146,6 +146,7 @@ remove_successfull(Options, Key) ->
 -spec start_cluster(cluster()) ->
     [pid()].
 start_cluster(Cluster) ->
+    _ = raft_server_log_ets_proxy:create_table(test_log_storage),
     TesterPid = raft_utils:throw_if_error(raft_rpc_tester:start_link()),
     ClusterSupPid = start_cluster_sup(),
     [start_server(Cluster, Self) || Self <- Cluster],
@@ -194,12 +195,20 @@ start_server_(Cluster, Name) ->
     raft_server:options().
 raft_options(Cluster, Self) ->
     N = lists_index(Self, Cluster),
+    LogStorage =
+        {raft_server_log_ets_proxy,
+            #{
+                table_name => test_log_storage,
+                id         => Self,
+                log        => raft_server_log_memory
+            }
+        },
     #{
         self              => Self,
         cluster           => Cluster,
         election_timeout  => {6, 9},
         broadcast_timeout => 3,
-        log               => raft_server_log_memory,
+        log               => LogStorage,
         rpc               => {raft_rpc_tester, Self},
         logger            => raft_rpc_logger_io_plant_uml,
         random_seed       => {0, N, N * 10}
