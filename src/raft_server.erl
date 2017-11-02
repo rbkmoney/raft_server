@@ -39,13 +39,11 @@
 %%%   -
 %%%  - проблемы:
 %%%   - нет обработки потери лидерства (а такое возможно) (нужно добавить колбек на это переход)
-%%%   - не удалять последующие элементы лога если нет конфликта (переделать логику добавления в лог)
 %%%   - репликация команды из прошлой эпохи (что это?)
 %%%   - нет проверки лидерства при обработке команды (нужно сделать проверку фиктивным коммитом)
 %%%   - неправильная работа с next/match index (переделать логику репликации)
 %%%   -
 %%%  - рефакторинг:
-%%%   - переделать работу со storage (и придумать как, но то, что есть — хрень :-\ )
 %%%   - убрать raft_utils и перенести всё в genlib
 %%%   -
 %%%  - тестирование:
@@ -60,8 +58,8 @@
 -export_type([timeout_ms   /0]).
 -export_type([timestamp_ms /0]).
 -export_type([options      /0]).
--export_type([raft_term    /0]).
 -export_type([index        /0]).
+-export_type([maybe_index  /0]).
 -export_type([command      /0]).
 -export_type([delta        /0]).
 -export_type([maybe_delta  /0]).
@@ -70,7 +68,6 @@
 -export_type([log_entry    /0]).
 -export_type([handler      /0]).
 -export_type([handler_state/0]).
--export_type([storage      /0]).
 -export_type([state        /0]).
 -export([start_link        /3]).
 -export([send_command      /5]).
@@ -98,41 +95,33 @@
     election_timeout  := timeout_ms() | {From::timeout_ms(), To::timeout_ms()},
     broadcast_timeout := timeout_ms(),
 
-    % хранилище состояния (TODO нужно переделать)
-    storage           := raft_storage:storage(),
-
-    % протокол общения между серверами
+    log               := raft_server_log:log(),
     rpc               := raft_rpc:rpc(),
-
-    % логгирование эвентов
-    logger            := raft_rpc_logger:logger(),
+    logger            := raft_rpc_logger:logger(), %% TODO rename
 
     random_seed       => {integer(), integer(), integer()} | undefined
 }.
 
 -type raft_term    () :: non_neg_integer().
--type index        () :: non_neg_integer().
+-type index        () :: raft_server_log:index().
+-type maybe_index  () :: raft_server_log:maybe_index().
 -type command      () :: _.
 -type delta        () :: _.
 -type maybe_delta  () :: delta() | undefined.
 -type reply        () :: _.
+-type reply_action () :: {reply, reply()} | noreply.
 -type log_entry    () :: {raft_term(), raft_rpc:request_id(), delta()}.
+-type ext_role     () :: leader | {follower, undefined | raft_rpc:endpoint()} | candidate.
+
 -type handler      () :: raft_utils:mod_opts().
 -type handler_state() :: _.
--type reply_action () :: {reply, reply()} | noreply.
-
--type storage() :: #{
-    system  => raft_storage:state(),
-    log     => raft_storage:state()
-}.
--type ext_role() :: leader | {follower, undefined | raft_rpc:endpoint()} | candidate.
 
 
 %%
 %% behaviour
 %%
 -callback init(_) ->
-    handler_state().
+    {maybe_index(), handler_state()}.
 
 -callback handle_election(_, handler_state()) ->
     {maybe_delta(), handler_state()}.
@@ -227,8 +216,8 @@ recv_response_command(RPC, ID, Timeout) ->
     heartbeat    :: timestamp_ms(),
     rpc_timeout  :: timestamp_ms(),
     next_index   :: index(),
-    match_index  :: index(),
-    commit_index :: index()
+    match_index  :: maybe_index(),
+    commit_index :: maybe_index()
 }).
 -type follower_state () :: #follower_state{}.
 -type followers_state() ::#{raft_rpc:endpoint() => follower_state()}.
@@ -240,20 +229,25 @@ recv_response_command(RPC, ID, Timeout) ->
 
 -opaque state() :: #{
     % текущая роль и специфичные для неё данные
-    role => role(),
+    role := role(),
 
     % текущий терм (вообще, имхо, слово "эпоха" тут более подходящее)
-    current_term  => raft_term(),
-    handler_state => handler_state(),
+    current_term  := raft_term(),
 
-    % состояние хранилища
-    storage_states => storage(),
+    % log
+    last_log_idx  := maybe_index(),
+    commit_idx    := maybe_index(),
+    log_state     := raft_server_log:state(),
+
+    % handler
+    last_applied_idx := maybe_index(),
+    handler_state    := handler_state(),
 
     % все полученные запросы, которые ожидают ответа
-    commands => [{raft_rpc:request_id(), raft_rpc:endpoint(), command()}],
+    commands := [{raft_rpc:request_id(), raft_rpc:endpoint(), command()}],
 
     % ответ на последний обработанный запрос
-    reply => {raft_rpc:endpoint(), raft_rpc:request_id(), reply()} | undefined
+    reply := {raft_rpc:endpoint(), raft_rpc:request_id(), reply()} | undefined
 }.
 
 % handling state
@@ -323,32 +317,42 @@ random_seed(Options) ->
 -define(candidate(Candidate), ?role({candidate, Candidate})).
 -define(follower            , ?role({follower , _        })).
 -define(follower (Follower ), ?role({follower , Follower })).
--define(current_term(CurrentTerm), #{state := #{current_term := CurrentTerm}}).
+-define(current_term    (CurrentTerm     ), #{state := #{current_term     := CurrentTerm     }}).
+-define(last_log_idx    (LastLogIndex    ), #{state := #{last_log_idx     := LastLogIndex    }}).
+-define(commit_idx      (CommitIndex     ), #{state := #{commit_idx       := CommitIndex     }}).
+-define(last_applied_idx(LastAppliedIndex), #{state := #{last_applied_idx := LastAppliedIndex}}).
 
 -spec new_state(handler(), options()) ->
     state().
-new_state(Handler, Options) ->
+new_state(Handler, #{log := Log}) ->
+    {LastLogIndex, CommitIndex, LogState} = log_init(Log),
+    {ApplyIndex, HandlerState} = handler_init(Handler),
     #{
-        role           => {follower, undefined},
-        current_term   => 0,
-        handler_state  => handler_init(Handler),
-        storage_states => init_storage(Options),
-        commands       => [],
-        reply          => undefined
+        role             => {follower, undefined},
+        current_term     => 0, % will be updated soon
+        last_log_idx     => LastLogIndex,
+        commit_idx       => CommitIndex,
+        log_state        => LogState,
+        last_applied_idx => ApplyIndex,
+        handler_state    => HandlerState,
+        commands         => [],
+        reply            => undefined
     }.
 
 -spec init_(hstate()) ->
     hstate().
-init_(HState = #{state := State}) ->
-    become_follower(HState#{state := State#{current_term := get_term_from_log(last_log_index(HState), HState)}}).
+init_(HState) ->
+    become_follower(update_current_term_from_log(HState)).
 
--spec init_storage(options()) ->
-    storage().
-init_storage(#{storage := Storage}) ->
-    #{
-        system  => raft_storage:init(Storage, system),
-        log     => raft_storage:init(Storage, log   )
-    }.
+-spec update_current_term_from_log(hstate()) ->
+    hstate().
+update_current_term_from_log(HState = #{state := State}) ->
+    CurrentTerm =
+        case last_log_entry(HState) of
+            undefined           -> 0;
+            {LastLogTerm, _, _} -> LastLogTerm
+        end,
+    HState#{state := State#{current_term := CurrentTerm}}.
 
 -spec handle_timeout_(hstate()) ->
     hstate().
@@ -404,8 +408,8 @@ handle_internal_rpc(From, {response, Type, Succeed, _}, HState) ->
 -spec handle_rpc_request(raft_rpc:internal_message_type(), raft_rpc:message_body(), raft_rpc:endpoint(), hstate()) ->
     {boolean(), hstate()}.
 handle_rpc_request(request_vote, {ReqLastLogIndex, ReqLastLogTerm}, Candidate, HState = ?follower(undefined)) ->
-    MyLastLogIndex = last_log_index(HState),
-    MyLastLogTerm  = get_term_from_log(MyLastLogIndex, HState),
+    ?last_log_idx(MyLastLogIndex) = HState,
+    MyLastLogTerm = get_term(MyLastLogIndex, HState),
     case MyLastLogTerm =< ReqLastLogTerm andalso MyLastLogIndex =< ReqLastLogIndex of
         true ->
             % Голосую!
@@ -426,8 +430,9 @@ handle_rpc_request(append_entries, Body, Leader, HState = ?candidate) ->
     handle_rpc_request(append_entries, Body, Leader, update_follower(Leader, become_follower(HState)));
 handle_rpc_request(append_entries, {Prev, Entries, CommitIndex}, _, HState0 = ?follower) ->
     {Result, HState1} = try_append_to_log(Prev, Entries, HState0),
+    ?last_log_idx(MyLastLogIndex) = ?commit_idx(MyCommitIndex) = HState1,
     HState2 =
-        case {Result, CommitIndex =< last_log_index(HState1)} of
+        case {Result, MyCommitIndex < CommitIndex andalso CommitIndex =< MyLastLogIndex} of
             {true , true} -> commit(CommitIndex, HState1);
             {_    , _   } -> HState1
         end,
@@ -456,19 +461,30 @@ handle_rpc_response(append_entries, From, Succeed, HState = ?leader(FollowersSta
         },
     try_send_append_entries(try_commit(update_leader_follower(From, NewFollowerState, HState)));
 handle_rpc_response(append_entries, _, _, HState = ?any_role) ->
-    % что-то уже устаревшее
+    % smth. stale
     HState.
 
 %%
 
--spec try_append_to_log({index(), index()}, [log_entry()], hstate()) ->
+-spec try_append_to_log({index(), maybe_index()}, [log_entry()], hstate()) ->
     {boolean(), hstate()}.
-try_append_to_log({PrevTerm, PrevIndex}, Entries, HState) ->
-    case (last_log_index(HState) >= PrevIndex) andalso get_term_from_log(PrevIndex, HState) of
+try_append_to_log({PrevTerm, PrevIndex}, Entries, HState = ?last_log_idx(LastLogIndex)) ->
+    case (LastLogIndex >= PrevIndex) andalso get_term(PrevIndex, HState) of
         PrevTerm ->
-            {true, append_log_entries(PrevIndex, Entries, HState)};
+            {true, append_if_differ(PrevIndex, Entries, HState)};
         _ ->
             {false, HState}
+    end.
+
+-spec append_if_differ(maybe_index(), [log_entry()], hstate()) ->
+    hstate().
+append_if_differ(_, [], HState) ->
+    HState;
+append_if_differ(PrevIndex, Entries = [Entry|RemainEntries], HState) ->
+    EntryIndex = PrevIndex + 1,
+    case log_entry(EntryIndex, HState) of
+        Entry -> append_if_differ(EntryIndex, RemainEntries, HState);
+        _     -> log_append(EntryIndex, Entries, HState)
     end.
 
 -spec add_vote(raft_rpc:endpoint(), hstate()) ->
@@ -488,8 +504,8 @@ try_become_leader(HState = ?candidate(Votes)) ->
 
 -spec try_commit(hstate()) ->
     hstate().
-try_commit(HState) ->
-    try_commit(last_log_index(HState), commit_index(HState), HState).
+try_commit(HState = ?last_log_idx(LastLogIndex) = ?commit_idx(CommitIndex)) ->
+    try_commit(LastLogIndex, CommitIndex, HState).
 
 -spec try_commit(index(), index(), hstate()) ->
     hstate().
@@ -497,7 +513,7 @@ try_commit(IndexN, CommitIndex, HState = ?current_term(CurrentTerm)) ->
     % If there exists an N such that N > commitIndex, a majority
     % of matchIndex[i] ≥ N, and log[N].term == currentTerm:
     % set commitIndex = N (§5.3, §5.4)
-    case IndexN > CommitIndex andalso get_term_from_log(IndexN, HState) =:= CurrentTerm of
+    case IndexN > CommitIndex andalso get_term(IndexN, HState) =:= CurrentTerm of
         true ->
             case is_replicated(IndexN, HState) of
                 true  -> send_last_reply(commit(IndexN, HState));
@@ -547,12 +563,12 @@ new_followers_state(HState = #{options := #{cluster := Cluster, self := Self}}) 
 
 -spec new_follower_state(hstate()) ->
     follower_state().
-new_follower_state(HState) ->
+new_follower_state(?last_log_idx(LastLogIndex)) ->
     #follower_state{
         heartbeat    = 0,
         rpc_timeout  = 0,
-        next_index   = last_log_index(HState) + 1,
-        match_index  = erlang:max(last_log_index(HState) - 1, 0),
+        next_index   = LastLogIndex + 1,
+        match_index  = erlang:max(LastLogIndex - 1, 0),
         commit_index = 0
     }.
 
@@ -606,14 +622,8 @@ become_leader_(HState) ->
 
 -spec append_and_send_log_entries(raft_rpc:request_id(), delta(), hstate()) ->
     hstate().
-append_and_send_log_entries(ID, Delta, HState = ?current_term(CurrentTerm)) ->
-    try_send_append_entries(
-        append_log_entries(
-            last_log_index(HState),
-            [{CurrentTerm, ID, Delta}],
-            HState
-        )
-    ).
+append_and_send_log_entries(ID, Delta, HState = ?current_term(CurrentTerm) = ?last_log_idx(LastLogIndex)) ->
+    try_send_append_entries(log_append(LastLogIndex, [{CurrentTerm, ID, Delta}], HState)).
 
 -spec set_role(role(), hstate()) ->
     hstate().
@@ -622,7 +632,7 @@ set_role(NewRole, HState = #{state := State}) ->
 
 -spec increment_current_term(hstate()) ->
     hstate().
-increment_current_term(HState = #{state := State = #{current_term := CurrentTerm}}) ->
+increment_current_term(HState = #{state := State} = ?current_term(CurrentTerm)) ->
     HState#{state := State#{current_term := CurrentTerm + 1}}.
 
 -spec update_leader(followers_state(), hstate()) ->
@@ -644,11 +654,11 @@ update_follower(Leader, HState = ?follower) ->
 
 -spec send_request_votes(hstate()) ->
     hstate().
-send_request_votes(HState = #{options := #{cluster := Cluster, self := Self}}) ->
-    LastIndex = last_log_index(HState),
+send_request_votes(HState = #{options := #{cluster := Cluster, self := Self}} = ?last_log_idx(LastLogIndex)) ->
     lists:foldl(
         fun(To, HStateAcc) ->
-            send_int_request(To, request_vote, {LastIndex, get_term_from_log(LastIndex, HStateAcc)}, HStateAcc)
+            Body = {LastLogIndex, get_term(LastLogIndex, HStateAcc)},
+            send_int_request(To, request_vote, Body, HStateAcc)
         end,
         HState,
         Cluster -- [Self]
@@ -678,7 +688,7 @@ try_send_one_append_entries(To, FollowerState, HState) ->
 
 -spec is_follower_obsolate(follower_state(), hstate()) ->
     boolean().
-is_follower_obsolate(FollowerState, HState) ->
+is_follower_obsolate(FollowerState, ?last_log_idx(LastLogIndex) = ?commit_idx(CommitIndex)) ->
     #follower_state{
         heartbeat    = HeartbeatDate,
         rpc_timeout  = RPCTimeoutDate,
@@ -686,8 +696,6 @@ is_follower_obsolate(FollowerState, HState) ->
         commit_index = FollowerCommitIndex
     } = FollowerState,
     Now = now_ms(),
-    CommitIndex = commit_index(HState),
-    LastLogIndex = last_log_index(HState),
 
            HeartbeatDate =< Now
     orelse NextIndex =< LastLogIndex andalso RPCTimeoutDate =< Now
@@ -696,6 +704,7 @@ is_follower_obsolate(FollowerState, HState) ->
 -spec update_follower_state(follower_state(), hstate()) ->
     follower_state().
 update_follower_state(FollowerState, HState = #{options := #{broadcast_timeout := Timeout}}) ->
+    ?last_log_idx(LastLogIndex) = ?commit_idx(CommitIndex) = HState,
     #follower_state{
         next_index  = NextIndex,
         match_index = MatchIndex
@@ -704,22 +713,22 @@ update_follower_state(FollowerState, HState = #{options := #{broadcast_timeout :
 
     NewNextIndex =
         case MatchIndex =:= (NextIndex - 1) of
-            true  -> last_log_index(HState) + 1;
+            true  -> LastLogIndex + 1;
             false -> NextIndex
         end,
 
     FollowerState#follower_state{
         next_index   = NewNextIndex,
-        commit_index = commit_index(HState),
+        commit_index = CommitIndex,
         heartbeat    = Now + Timeout,
         rpc_timeout  = Now + Timeout
     }.
 
 -spec send_append_entries(raft_rpc:endpoint(), index(), index(), hstate()) ->
     hstate().
-send_append_entries(To, NextIndex, MatchIndex, HState) ->
-    Prev = {get_term_from_log(MatchIndex, HState), MatchIndex},
-    Body = {Prev, log_entries(MatchIndex + 1, NextIndex, HState), commit_index(HState)},
+send_append_entries(To, NextIndex, MatchIndex, HState = ?commit_idx(CommitIndex)) ->
+    Prev = {get_term(MatchIndex, HState), MatchIndex},
+    Body = {Prev, log_entries(MatchIndex + 1, NextIndex, HState), CommitIndex},
     send_int_request(To, append_entries, Body, HState).
 
 -spec send_int_request(raft_rpc:endpoint(), raft_rpc:internal_message_type(), raft_rpc:message_body(), hstate()) ->
@@ -745,12 +754,7 @@ send(To, Message, HState = #{options := #{self := Self}}) ->
 -spec send(raft_rpc:endpoint(), raft_rpc:endpoint(), raft_rpc:message(), hstate()) ->
     hstate().
 send(From, To, Message, HState = #{messages := Messages}) ->
-    HState#{messages := [{From, To, Message}|Messages]}.
-
--spec get_term_from_log(index(), hstate()) ->
-    term().
-get_term_from_log(Index, HState) ->
-    element(1, log_entry(Index, HState)).
+    HState#{messages := [{From, To, Message} | Messages]}.
 
 %%
 %% Timers
@@ -762,7 +766,8 @@ schedule_election_timer(HState = #{options := #{election_timeout := Timeout}}) -
 
 -spec schedule_next_heartbeat_timer(hstate()) ->
     hstate().
-schedule_next_heartbeat_timer(HState = #{options := #{broadcast_timeout := BroadcastTimeout}} = ?leader(FollowersState)) ->
+schedule_next_heartbeat_timer(HState = ?leader(FollowersState)) ->
+    #{options := #{broadcast_timeout := BroadcastTimeout}} = HState,
     NextHeardbeat =
         lists:min(
             [now_ms() + BroadcastTimeout] ++
@@ -791,30 +796,30 @@ randomize_timeout(Const) ->
 
 -spec commit(index(), hstate()) ->
     hstate().
-commit(Index, HState) ->
-    try_apply_commited(set_commit_index(Index, HState)).
+commit(Index, HState = #{state := State}) ->
+    try_apply_commited(log_commit(Index, HState#{state := State#{commit_idx := Index}})).
 
 -spec try_apply_commited(hstate()) ->
     hstate().
-try_apply_commited(HState) ->
-    LastApplied = last_applied(HState),
-    case LastApplied < commit_index(HState) of
+try_apply_commited(HState = ?last_applied_idx(LastAppliedIndex) = ?commit_idx(CommitIndex)) ->
+    case LastAppliedIndex < CommitIndex of
         true ->
-            try_apply_commited(apply_commited(LastApplied + 1, HState));
+            try_apply_commited(apply_commited(LastAppliedIndex + 1, HState));
         false ->
             try_handle_next_command(HState)
     end.
 
 -spec apply_commited(index(), hstate()) ->
     hstate().
-apply_commited(Index, HState) ->
+apply_commited(Index, HState = #{state := State}) ->
     {_, ID, Delta} = log_entry(Index, HState),
-    set_last_applied(Index, handler_apply_delta(ID, Delta, HState)).
+    handler_apply_delta(ID, Delta, HState#{state := State#{last_applied_idx := Index}}).
 
 -spec try_handle_next_command(hstate()) ->
     hstate().
 try_handle_next_command(HState = #{state := State = #{commands := [NextRequest|RemainRequests]}} = ?leader) ->
-    case last_log_index(HState) =:= commit_index(HState) of
+    ?commit_idx(CommitIndex) = ?last_log_idx(LastLogIndex)= HState,
+    case LastLogIndex =:= CommitIndex of
         true ->
             {ID, From, Command} = NextRequest,
             handler_handle_command(ID, From, Command, HState#{state := State#{commands := RemainRequests}});
@@ -824,89 +829,51 @@ try_handle_next_command(HState = #{state := State = #{commands := [NextRequest|R
 try_handle_next_command(HState) ->
     HState.
 
--spec last_applied(hstate()) ->
-    index().
-last_applied(HState) ->
-    set_default(storage_get_one(system, last_applied, HState), 0).
-
--spec set_last_applied(index(), hstate()) ->
-    hstate().
-set_last_applied(Index, HState) ->
-    storage_put(system, [{last_applied, Index}], HState).
-
--spec commit_index(hstate()) ->
-    index().
-commit_index(HState) ->
-    set_default(storage_get_one(system, commit_index, HState), 0).
-
--spec set_commit_index(index(), hstate()) ->
-    hstate().
-set_commit_index(Index, HState) ->
-    storage_put(system, [{commit_index, Index}], HState).
-
--spec last_log_index(hstate()) ->
-    index().
-last_log_index(HState) ->
-    set_default(storage_get_one(system, last_log_index, HState), 0).
-
--spec set_last_log_index(index(), hstate()) ->
-    hstate().
-set_last_log_index(Index, HState) ->
-    storage_put(system, [{last_log_index, Index}], HState).
-
--spec try_set_last_log_index(index(), hstate()) ->
-    hstate().
-try_set_last_log_index(Index, HState) ->
-    set_last_log_index(erlang:max(Index, last_log_index(HState)), HState).
-
--spec log_entry(index(), hstate()) ->
-    log_entry().
-log_entry(Index, HState) ->
-    set_default(storage_get_one(log, Index, HState), {0, undefined}).
-
--spec log_entries(index(), index(), hstate()) ->
-    [log_entry()].
-log_entries(From, To, HState) ->
-    storage_get(log, lists:seq(From, To), HState).
-
--spec append_log_entries(index(), [log_entry()], hstate()) ->
-    hstate().
-append_log_entries(PrevIndex, Entries, HState) ->
-    LastIndex = PrevIndex + erlang:length(Entries),
-    Values    = lists:zip(lists:seq(PrevIndex + 1, LastIndex), Entries),
-    try_set_last_log_index(LastIndex, storage_put(log, Values, HState)).
+-spec get_term(index(), hstate()) ->
+    raft_term().
+get_term(0, _) ->
+    0;
+get_term(Index, HState) ->
+    element(1, log_entry(Index, HState)).
 
 -spec last_log_entry(hstate()) ->
     log_entry() | undefined.
-last_log_entry(HState) ->
-    storage_get_one(log, last_log_index(HState), HState).
-
--spec set_default(undefined | Value, Value) ->
-    Value.
-set_default(undefined, Default) ->
-    Default;
-set_default(Value, _) ->
-    Value.
+last_log_entry(HState = ?last_log_idx(LastLogIndex)) ->
+    log_entry(LastLogIndex, HState).
 
 %%
-%% interaction with storage
+%% log
 %%
--spec storage_put(raft_storage:type(), [{raft_storage:key(), raft_storage:value()}], hstate()) ->
+-define(log(Log, LogState), #{options := #{log := Log}, state := #{log_state := LogState}}).
+
+-spec log_init(raft_server_log:log()) ->
+    {index(), index(), raft_server_log:state()}.
+log_init(Log) ->
+    raft_server_log:init(Log).
+
+-spec log_commit(index(), hstate()) ->
     hstate().
-storage_put(Type, Values, HState = #{options := #{storage := Storage}, state := State = #{storage_states := StorageStates}}) ->
-    StorageState = maps:get(Type, StorageStates),
-    NewStorageState = raft_storage:put(Storage, Values, StorageState),
-    HState#{state := State#{storage_states := StorageStates#{Type := NewStorageState}}}.
+log_commit(Index, HState = ?log(Log, LogState) = #{state := State}) ->
+    NewLogState = raft_server_log:commit(Log, Index, LogState),
+    HState#{state := State#{log_state := NewLogState}}.
 
--spec storage_get(raft_storage:type(), [raft_storage:key()], hstate()) ->
-    [raft_storage:value()].
-storage_get(Type, Keys, #{options := #{storage := Storage}, state := #{storage_states := StorageStates}}) ->
-    raft_storage:get(Storage, Keys, maps:get(Type, StorageStates)).
+-spec log_entry(maybe_index(), hstate()) ->
+    log_entry() | undefined.
+log_entry(0, _) ->
+    undefined;
+log_entry(Index, ?log(Log, LogState)) ->
+    raft_server_log:entry(Log, Index, LogState).
 
--spec storage_get_one(raft_storage:type(), raft_storage:key(), hstate()) ->
-    raft_storage:value().
-storage_get_one(Type, Key, #{options := #{storage := Storage}, state := #{storage_states := StorageStates}}) ->
-    raft_storage:get_one(Storage, Key, maps:get(Type, StorageStates)).
+-spec log_entries(index(), index(), hstate()) ->
+    [log_entry()].
+log_entries(From, To, ?log(Log, LogState)) ->
+    raft_server_log:entries(Log, From, To, LogState).
+
+-spec log_append(index(), [log_entry()], hstate()) ->
+    hstate().
+log_append(From, Entries, HState = ?log(Log, LogState) = #{state := State} = ?last_log_idx(LastLogIndex)) ->
+    NewLogState = raft_server_log:append(Log, From, Entries, LogState),
+    HState#{state := State#{log_state := NewLogState, last_log_idx := LastLogIndex + erlang:length(Entries)}}.
 
 %%
 %% interaction with handler
@@ -1023,13 +990,17 @@ maps_mapfoldl_to_map({List, Acc}) ->
 %%
 -spec format_state({handler(), options()}, state()) ->
     list().
-format_state({Handler, Options}, State = #{current_term := Term, role := Role}) ->
-    HState      = hstate(Handler, Options, undefined, State),
-    Commit      = commit_index(HState),
-    LastApplied = last_applied(HState),
-    LastLog     = last_log_index(HState),
-    LastLogEntry = last_log_entry(HState),
-    io_lib:format("~9999p ~9999p ~9999p ~9999p ~9999p ~9999p", [ext_role(Role), Term, LastLog, Commit, LastApplied, LastLogEntry]).
+format_state({Handler, Options}, State) ->
+    #{
+        role             := Role,
+        current_term     := Term,
+        last_log_idx     := LastLog,
+        commit_idx       := CommitIndex,
+        last_applied_idx := LastApplied
+    } = State,
+    LastLogEntry = last_log_entry(hstate(Handler, Options, undefined, State)),
+    io_lib:format("~9999p ~9999p ~9999p ~9999p ~9999p ~9999p",
+        [ext_role(Role), Term, LastLog, CommitIndex, LastApplied, LastLogEntry]).
 
 -spec format_self_endpoint({handler(), options()}, state()) ->
     list().

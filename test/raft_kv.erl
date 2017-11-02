@@ -101,9 +101,9 @@ retry(#{election_timeout := ElectionTimeout, broadcast_timeout := BroadcastTimeo
 -type delta() :: write_command().
 
 -spec init(_) ->
-    state().
+    {raft_server:maybe_index(), state()}.
 init(_) ->
-    #{}.
+    {0, #{}}.
 
 -spec handle_election(_, state()) ->
     {delta() | undefined, state()}.

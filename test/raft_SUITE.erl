@@ -199,7 +199,7 @@ raft_options(Cluster, Self) ->
         cluster           => Cluster,
         election_timeout  => {6, 9},
         broadcast_timeout => 3,
-        storage           => raft_storage_memory,
+        log               => raft_server_log_memory,
         rpc               => {raft_rpc_tester, Self},
         logger            => raft_rpc_logger_io_plant_uml,
         random_seed       => {0, N, N * 10}

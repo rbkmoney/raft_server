@@ -239,7 +239,7 @@ raft_options(RPC, Cluster, Self) ->
         cluster           => cluster(RPC, Cluster),
         election_timeout  => ElectionTimeout,
         broadcast_timeout => BroadcastTimeout,
-        storage           => raft_storage_memory,
+        log               => raft_server_log_memory,
         rpc               => rpc_mod_opts(RPC, Self),
         logger            => raft_rpc_logger_io_plant_uml
     }.
@@ -381,9 +381,9 @@ send_command(RPCConfig, ClusterConfig, Command) ->
 -type delta() :: _.
 
 -spec init(_) ->
-    state().
+    {raft_server:maybe_index(), state()}.
 init(_) ->
-    undefined.
+    {0, undefined}.
 
 -spec handle_election(_, state()) ->
     {undefined, state()}.

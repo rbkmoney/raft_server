@@ -64,9 +64,9 @@ async_command(#{rpc := RPC, cluster := Cluster}) ->
 -type delta() :: delta.
 
 -spec init(_) ->
-    state().
+    {raft_server:maybe_index(), state()}.
 init(_) ->
-    state.
+    {0, state}.
 
 -spec handle_election(_, state()) ->
     {undefined, state()}.
