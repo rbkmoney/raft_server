@@ -89,25 +89,25 @@
 
 -type options() :: #{
     % состав рафт-группы
-    self              => raft_rpc:endpoint(),
-    cluster           => ordsets:ordset(raft_rpc:endpoint()),
+    self              := raft_rpc:endpoint(),
+    cluster           := ordsets:ordset(raft_rpc:endpoint()),
 
     % таймауты raft протокола (это важная настройка!)
     % election_timeout << broadcast_timeout << mean_time_between_failures
     % election_timeout ~ 2 * broadcast_timeout
-    election_timeout  => timeout_ms() | {From::timeout_ms(), To::timeout_ms()},
-    broadcast_timeout => timeout_ms(),
+    election_timeout  := timeout_ms() | {From::timeout_ms(), To::timeout_ms()},
+    broadcast_timeout := timeout_ms(),
 
     % хранилище состояния (TODO нужно переделать)
-    storage           => raft_storage:storage(),
+    storage           := raft_storage:storage(),
 
     % протокол общения между серверами
-    rpc               => raft_rpc:rpc(),
+    rpc               := raft_rpc:rpc(),
 
     % логгирование эвентов
-    logger            => raft_rpc_logger:logger(),
+    logger            := raft_rpc_logger:logger(),
 
-    random_seed       := {integer(), integer(), integer()} | undefined
+    random_seed       => {integer(), integer(), integer()} | undefined
 }.
 
 -type raft_term    () :: non_neg_integer().
