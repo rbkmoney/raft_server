@@ -28,15 +28,14 @@
 %%%   -
 %%%  - доработки:
 %%%   - привести в порядок таймауты запросов к кластеру
-%%%   - лимит на длинну очереди команд
 %%%   - компактизация стейта и оптимизация наливки свежего елемента группы
 %%%   - внешние сериализаторы для rpc и msgpack реализация
 %%%   - сессия обращения
 %%%   - ресайз кластера (а нужно ли?)
 %%%   -
 %%%  - проблемы:
+%%%   - команды надо хранить #{ID => {[From], Command}}, отвечать всем и лимитировать длинну очереди
 %%%   - нет обработки потери лидерства (а такое возможно) (нужно добавить колбек на это переход)
-%%%   - репликация команды из прошлой эпохи (что это?)
 %%%   - нет проверки лидерства при обработке команды (нужно сделать проверку фиктивным коммитом)
 %%%   - неправильная работа с next/match index (переделать логику репликации)
 %%%   -
@@ -458,12 +457,12 @@ handle_rpc_response(append_entries, From, Succeed, HState = ?leader(FollowersSta
     #follower_state{next_index = NextIndex, match_index = MatchIndex} = FollowerState = maps:get(From, FollowersState),
     NewMatchIndex =
         case Succeed of
-            true  -> NextIndex - 1;
+            true  -> NextIndex  - 1;
             false -> MatchIndex - 1
         end,
     NewFollowerState =
         FollowerState#follower_state{
-            match_index = NewMatchIndex,
+            match_index = erlang:max(0, NewMatchIndex),
             rpc_timeout = 0
         },
     try_send_append_entries(try_commit(update_leader_follower(From, NewFollowerState, HState)));
@@ -625,7 +624,36 @@ become_leader(HState = ?candidate) -> become_leader_(HState).
 -spec become_leader_(hstate()) ->
     hstate().
 become_leader_(HState) ->
-    handler_handle_election(set_role({leader, new_followers_state(HState)}, HState)).
+    try_apply_commited(
+        handler_handle_election(
+            update_term_for_not_commited(
+                set_role(
+                    {leader, new_followers_state(HState)},
+                    HState
+                )
+            )
+        )
+    ).
+
+-spec update_term_for_not_commited(hstate()) ->
+    hstate().
+update_term_for_not_commited(HState = ?current_term(CurrentTerm) = ?commit_idx(CommitIndex) = ?last_log_idx(LastLogIndex)) ->
+    % имхо, самый неочивидный кусок рафта
+    % репликация команды из прошлой эпохи, что это?
+    %  Когда текущая команда лидером не коммитится, и лидер теряется,
+    %  то новому лидеру коммитить эту команду нельзя (почему?).
+    %  Ей нужно прокачать терм до текущего, и уже так реплицировать и коммитить.
+
+    % Нужно дропнуть все незакоммиченные команды лога и добавить их с текущим термом.
+    UpdatedEntries =
+        lists:map(
+            fun({_, ID, Body}) ->
+                {CurrentTerm, ID, Body}
+            end,
+            log_entries(CommitIndex + 1, LastLogIndex, HState)
+        ),
+    log_append(CommitIndex, UpdatedEntries, HState).
+
 
 -spec append_and_send_log_entries(raft_rpc:request_id(), delta(), hstate()) ->
     hstate().
@@ -841,7 +869,10 @@ try_handle_next_command(HState) ->
 get_term(0, _) ->
     0;
 get_term(Index, HState) ->
-    element(1, log_entry(Index, HState)).
+    case log_entry(Index, HState) of
+        {Term, _, _} -> Term;
+        undefined    -> exit({Index, HState})
+    end.
 
 -spec last_log_entry(hstate()) ->
     log_entry() | undefined.
@@ -883,9 +914,9 @@ log_entries(From, To, ?log(Log, LogState)) ->
 
 -spec log_append(index(), [log_entry()], hstate()) ->
     hstate().
-log_append(From, Entries, HState = ?log(Log, LogState) = #{state := State} = ?last_log_idx(LastLogIndex)) ->
+log_append(From, Entries, HState = ?log(Log, LogState) = #{state := State}) ->
     NewLogState = raft_server_log:append(Log, From, Entries, LogState),
-    HState#{state := State#{log_state := NewLogState, last_log_idx := LastLogIndex + erlang:length(Entries)}}.
+    update_indexes(HState#{state := State#{log_state := NewLogState}}).
 
 %%
 %% interaction with handler
@@ -1002,6 +1033,8 @@ maps_mapfoldl_to_map({List, Acc}) ->
 %%
 -spec format_state({handler(), options()}, state()) ->
     list().
+% format_state({Handler, Options}, State) ->
+%     io_lib:format("~999999p", [State]).
 format_state({Handler, Options}, State) ->
     #{
         role             := Role,
