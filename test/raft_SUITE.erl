@@ -16,7 +16,6 @@
 
 %%%
 %%% TODO
-%%%  - заменить сторадж на общий, чтобы можно было останавливать и запускать с места остановки
 %%%  - ловить эвенты от лидер-группы (например о перееизбрании)
 %%%  -
 %%%
@@ -31,6 +30,7 @@
 %% tests
 -export([base_test                /1]).
 -export([cluster_simple_split_test/1]).
+-export([prop_test                /1]).
 
 %% internal
 -export([start_server_/2]).
@@ -48,7 +48,8 @@
 all() ->
     [
         base_test,
-        cluster_simple_split_test
+        cluster_simple_split_test,
+        prop_test
     ].
 
 %%
@@ -60,9 +61,11 @@ init_per_suite(C) ->
     {ok, Apps} = application:ensure_all_started(raft),
 
     % dbg:tracer(), dbg:p(all, c),
-    % dbg:tpl({raft, 'schedule_election_timer', '_'}, x),
+    % dbg:tpl({raft_server, 'get_term', '_'}, x),
     % dbg:tpl({?MODULE, handle_sync_command, '_'}, x),
 
+    ct_property_test:init_per_suite(C)
+    ++
     [
           {cluster, [erlang:list_to_atom(erlang:integer_to_list(N)) || N <- lists:seq(1, 5)]}
         , {apps, Apps}
@@ -139,6 +142,13 @@ read_success(Options, Key, Value) ->
 remove_successfull(Options, Key) ->
     ok = raft_kv:remove(Options, Key).
 
+-spec prop_test(config()) ->
+    _.
+prop_test(C) ->
+    ct_property_test:quickcheck(
+        raft_server_pt:prop_test(),
+        C
+    ).
 
 %%
 %% raft cluster
