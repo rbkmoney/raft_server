@@ -32,7 +32,7 @@
     table_name := atom()
 }.
 
--type fake_state() :: fake_state.
+-type state() :: raft_server_log:state().
 
 %%
 %% API
@@ -47,55 +47,53 @@ create_table(TableName) ->
 %% raft_server_log callbacks
 %%
 -spec init(options()) ->
-    fake_state().
+    state().
 init(Options = #{log := Log}) ->
-    _ = case get_state(Options) of
-            undefined ->
-                store_state(Options, raft_server_log:init(Log));
-            _ ->
-                ok
-        end,
-    fake_state.
+    case get_state(Options) of
+        undefined ->
+            store_state(Options, raft_server_log:init(Log));
+        State ->
+            State
+    end.
 
--spec indexes(_, fake_state()) ->
+-spec indexes(_, state()) ->
     {raft_server_log:maybe_index(), raft_server_log:maybe_index()}.
-indexes(Options = #{log := Log}, fake_state) ->
-    raft_server_log:indexes(Log, get_state(Options)).
+indexes(#{log := Log}, State) ->
+    raft_server_log:indexes(Log, State).
 
--spec entry(options(), raft_server_log:index(), fake_state()) ->
+-spec entry(options(), raft_server_log:index(), state()) ->
     raft_server_log:entry().
-entry(Options = #{log := Log}, Index, fake_state) ->
-    raft_server_log:entry(Log, Index, get_state(Options)).
+entry(#{log := Log}, Index, State) ->
+    raft_server_log:entry(Log, Index, State).
 
--spec entries(options(), raft_server_log:index(), raft_server_log:index(), fake_state()) ->
+-spec entries(options(), raft_server_log:index(), raft_server_log:index(), state()) ->
     [raft_server_log:entry()].
-entries(Options = #{log := Log}, From, To, fake_state) ->
-    raft_server_log:entries(Log, From, To, get_state(Options)).
+entries(#{log := Log}, From, To, State) ->
+    raft_server_log:entries(Log, From, To, State).
 
--spec append(options(), raft_server_log:index(), [raft_server_log:entry()], fake_state()) ->
-    fake_state().
-append(Options = #{log := Log}, From, Entries, fake_state) ->
-    _ = store_state(Options, raft_server_log:append(Log, From, Entries, get_state(Options))),
-    fake_state.
+-spec append(options(), raft_server_log:index(), [raft_server_log:entry()], state()) ->
+    state().
+append(Options = #{log := Log}, From, Entries, _) ->
+    store_state(Options, raft_server_log:append(Log, From, Entries, get_state(Options))).
 
--spec commit(options(), raft_server_log:index(), fake_state()) ->
-    fake_state().
-commit(Options = #{log := Log}, NewCommitIndex, fake_state) ->
-    _ = store_state(Options, raft_server_log:commit(Log, NewCommitIndex, get_state(Options))),
-    fake_state.
+-spec commit(options(), raft_server_log:index(), state()) ->
+    state().
+commit(Options = #{log := Log}, NewCommitIndex, _) ->
+    store_state(Options, raft_server_log:commit(Log, NewCommitIndex, get_state(Options))).
 
 %%
 %% local
 %%
 -spec get_state(options()) ->
-    raft_server_log:state().
+    state().
 get_state(#{table_name := TableName, id := ID}) ->
     case ets:lookup(TableName, ID) of
         [           ] -> undefined;
         [{ID, State}] -> State
     end.
 
--spec store_state(options(), raft_server_log:state()) ->
-    _.
+-spec store_state(options(), state()) ->
+    state().
 store_state(#{table_name := TableName, id := ID}, LogState) ->
-    true = ets:insert(TableName, {ID, LogState}).
+    true = ets:insert(TableName, {ID, LogState}),
+    LogState.
