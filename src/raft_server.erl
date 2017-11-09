@@ -34,7 +34,7 @@
 %%%   - ресайз кластера (а нужно ли?)
 %%%   -
 %%%  - проблемы:
-%%%   - команды надо хранить #{ID => {[From], Command}}, отвечать всем и лимитировать длинну очереди
+%%%   - команды надо хранить #{ID => {[From], Command}}, отвечать всем
 %%%   - нет обработки потери лидерства (а такое возможно) (нужно добавить колбек на это переход)
 %%%   - нет проверки лидерства при обработке команды (нужно сделать проверку пустым append entries)
 %%%   -
@@ -92,11 +92,13 @@
     election_timeout  := timeout_ms() | {From::timeout_ms(), To::timeout_ms()},
     broadcast_timeout := timeout_ms(),
 
+    % TODO rename log to log_storage
     log               := raft_server_log:log(),
     rpc               := raft_rpc:rpc(),
-    logger            := raft_rpc_logger:logger(), %% TODO rename
+    logger            := raft_rpc_logger:logger(),
 
-    random_seed       => {integer(), integer(), integer()} | undefined
+    random_seed       => {integer(), integer(), integer()} | undefined,
+    max_queue_length  => pos_integer() % default 10
 }.
 
 -type raft_term    () :: non_neg_integer().
@@ -570,8 +572,14 @@ send_reply(To, ID, {reply, Reply}, HState) ->
 
 -spec append_command(raft_rpc:request_id(), raft_rpc:endpoint(), command(), hstate()) ->
     hstate().
-append_command(ID, From, Command, HState = ?leader(LState = #{commands := Commands})) ->
-    update_leader(LState#{commands := lists:keystore(ID, 1, Commands, {ID, From, Command})}, HState).
+append_command(ID, From, Command, HState = ?leader(LState = #{commands := Commands}) = #{options := Options}) ->
+    case erlang:length(Commands) < maps:get(max_queue_length, Options, 10) of
+        true ->
+            update_leader(LState#{commands := lists:keystore(ID, 1, Commands, {ID, From, Command})}, HState);
+        false ->
+            % очередь заполнена, команду просто отбрасываем
+            HState
+    end.
 
 %%
 %% role changing
