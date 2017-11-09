@@ -98,6 +98,7 @@
     logger            := raft_rpc_logger:logger(),
 
     random_seed       => {integer(), integer(), integer()} | undefined,
+    replication_batch => pos_integer(), % default 10
     max_queue_length  => pos_integer() % default 10
 }.
 
@@ -446,7 +447,6 @@ handle_rpc_request(append_entries, {Prev, Entries, LeaderCommitIndex}, _, HState
         end,
     {{AppendResult, MyLastLogIndex}, schedule_election_timer(HState2)}.
 
--define(REPL_BATCH, 10). % TODO настраивать
 -spec handle_rpc_response(raft_rpc:internal_message_type(), raft_rpc:endpoint(), _, hstate()) ->
     hstate().
 handle_rpc_response(request_vote, From, true, HState = ?candidate) ->
@@ -456,14 +456,15 @@ handle_rpc_response(request_vote, _, _, HState = ?any_role) ->
     % за меня проголосовали когда мне уже эти голоса не нужны
     % я уже либо лидер, либо фолловер
     HState;
-handle_rpc_response(append_entries, From, {AppendResult, FollowerLastLogIndex}, HState = ?leader(#{followers := FollowersState})) ->
+handle_rpc_response(append_entries, From, {AppendResult, FollowerLastLogIndex}, HState = ?leader) ->
+    #{options := Options} = ?leader(#{followers := FollowersState}) = HState,
     #follower_state{next_index = NextIndex, match_index = MatchIndex} = FollowerState = maps:get(From, FollowersState),
     {NewMatchIndex, NewNextIndex} =
         case {AppendResult, (NextIndex - 1) =< FollowerLastLogIndex} of
             {true, _} ->
                 {FollowerLastLogIndex, FollowerLastLogIndex + 1};
             {false, true} ->
-                {MatchIndex, erlang:max(NextIndex - ?REPL_BATCH, MatchIndex + 1)};
+                {MatchIndex, erlang:max(NextIndex - replication_batch(Options), MatchIndex + 1)};
             {false, false} ->
                 {MatchIndex, FollowerLastLogIndex + 1}
         end,
@@ -573,7 +574,7 @@ send_reply(To, ID, {reply, Reply}, HState) ->
 -spec append_command(raft_rpc:request_id(), raft_rpc:endpoint(), command(), hstate()) ->
     hstate().
 append_command(ID, From, Command, HState = ?leader(LState = #{commands := Commands}) = #{options := Options}) ->
-    case erlang:length(Commands) < maps:get(max_queue_length, Options, 10) of
+    case erlang:length(Commands) < max_queue_length(Options) of
         true ->
             update_leader(LState#{commands := lists:keystore(ID, 1, Commands, {ID, From, Command})}, HState);
         false ->
@@ -727,7 +728,7 @@ try_send_append_entries(HState = ?leader(LState = #{followers := FollowersState}
 -spec try_send_one_append_entries(raft_rpc:endpoint(), follower_state(), hstate()) ->
     {follower_state(), hstate()}.
 try_send_one_append_entries(To, FollowerState, HState) ->
-    ?last_log_idx(LastLogIndex) = #{options := #{broadcast_timeout := Timeout}} = HState,
+    ?last_log_idx(LastLogIndex) = #{options := #{broadcast_timeout := Timeout} = Options} = HState,
     #follower_state{
         heartbeat    = HeartbeatDate,
         repl_timeout = ReplTimeoutDate,
@@ -742,7 +743,8 @@ try_send_one_append_entries(To, FollowerState, HState) ->
                     heartbeat    = Now + Timeout,
                     repl_timeout = Now + Timeout
                 },
-            NewHState = send_append_entries(To, NextIndex, erlang:min(NextIndex + ?REPL_BATCH - 1, LastLogIndex), HState),
+            ToIndex = erlang:min(NextIndex + replication_batch(Options) - 1, LastLogIndex),
+            NewHState = send_append_entries(To, NextIndex, ToIndex, HState),
             {NewFollowersState, NewHState};
         false ->
             {FollowerState, HState}
@@ -989,6 +991,16 @@ update_handler_state(HState = #{state := State}, NewHandlerState) ->
     raft_rpc_server:options().
 rpc_server_options(Options) ->
     maps:with([rpc, logger], Options).
+
+-spec replication_batch(options()) ->
+    pos_integer().
+replication_batch(Options) ->
+    maps:get(replication_batch, Options, 10).
+
+-spec max_queue_length(options()) ->
+    pos_integer().
+max_queue_length(Options) ->
+    maps:get(max_queue_length, Options, 10).
 
 -spec lists_unzip_element(pos_integer(), [tuple()]) ->
     _.
