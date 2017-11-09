@@ -35,7 +35,6 @@
 %%%   -
 %%%  - проблемы:
 %%%   - команды надо хранить #{ID => {[From], Command}}, отвечать всем
-%%%   - нет обработки потери лидерства (а такое возможно) (нужно добавить колбек на это переход)
 %%%   - нет проверки лидерства при обработке команды (нужно сделать проверку пустым append entries)
 %%%   -
 %%%  - рефакторинг:
@@ -125,6 +124,9 @@
 
 -callback handle_election(_, handler_state()) ->
     {maybe_delta(), handler_state()}.
+
+-callback handle_surrend(_, handler_state()) ->
+    handler_state().
 
 -callback handle_async_command(_, raft_rpc:request_id(), command(), handler_state()) ->
     {reply_action(), handler_state()}.
@@ -589,7 +591,7 @@ append_command(ID, From, Command, HState = ?leader(LState = #{commands := Comman
 become_follower(hstate()           ) -> hstate().
 become_follower(HState = ?follower ) -> become_follower_(HState);
 become_follower(HState = ?candidate) -> become_follower_(HState);
-become_follower(HState = ?leader   ) -> become_follower_(HState).
+become_follower(HState = ?leader   ) -> become_follower_(handler_handle_surrend(HState)).
 
 -spec become_follower_(hstate()) ->
     hstate().
@@ -601,7 +603,8 @@ become_follower_(HState) ->
 -spec
 become_candidate(hstate()           ) -> hstate().
 become_candidate(HState = ?follower ) -> become_candidate_(HState);
-become_candidate(HState = ?candidate) -> become_candidate_(HState).
+become_candidate(HState = ?candidate) -> become_candidate_(HState);
+become_candidate(HState = ?leader   ) -> become_candidate_(handler_handle_surrend(HState)).
 
 -spec become_candidate_(hstate()) ->
     hstate().
@@ -931,6 +934,12 @@ handler_handle_election(HState = ?handler(Handler, HandlerState)) ->
             % TODO подумать про request_id
             append_and_send_log_entries(undefined, Delta, NewState)
     end.
+
+-spec handler_handle_surrend(hstate()) ->
+    hstate().
+handler_handle_surrend(HState = ?handler(Handler, HandlerState)) ->
+    NewHandlerState = raft_utils:apply_mod_opts(Handler, handle_surrend, [HandlerState]),
+    update_handler_state(HState, NewHandlerState).
 
 %%
 %% исполняется на лидере, может сгенерить изменение стейта — дельту

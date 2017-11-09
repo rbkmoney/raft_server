@@ -23,7 +23,7 @@
 
 %% raft_server
 -behaviour(raft_server).
--export([init/1, handle_election/2, handle_command/4, handle_async_command/4, handle_info/3, apply_delta/4]).
+-export([init/1, handle_election/2, handle_surrend/2, handle_command/4, handle_async_command/4, handle_info/3, apply_delta/4]).
 
 %%
 %% API
@@ -72,6 +72,11 @@ init(_) ->
     {undefined, state()}.
 handle_election(_, state) ->
     {undefined, state}.
+
+-spec handle_surrend(_, state()) ->
+    state().
+handle_surrend(_, state) ->
+    state.
 
 -spec handle_async_command(_, raft_rpc:request_id(), async_command(), state()) ->
     {raft_server:reply_action(), state()}.
