@@ -23,7 +23,6 @@
 %%%
 %%% TODO:
 %%%  - обязательное:
-%%%   - ответить всем
 %%%   - внешнее ревью
 %%%   -
 %%%  - доработки:
@@ -34,7 +33,6 @@
 %%%   - ресайз кластера (а нужно ли?)
 %%%   -
 %%%  - проблемы:
-%%%   - команды надо хранить #{ID => {[From], Command}}, отвечать всем
 %%%   - нет проверки лидерства при обработке команды (нужно сделать проверку пустым append entries)
 %%%   -
 %%%  - рефакторинг:
@@ -222,7 +220,7 @@ recv_response_command(RPC, ID, Timeout) ->
 }).
 -type follower_state () :: #follower_state{}.
 -type followers_state() ::#{raft_rpc:endpoint() => follower_state()}.
--type commands() :: [{raft_rpc:request_id(), raft_rpc:endpoint(), command()}].
+-type commands() :: [{raft_rpc:request_id(), [raft_rpc:endpoint()], command()}].
 -type leader_state() :: #{
     % состояния фолловеров
     followers => followers_state(),
@@ -231,7 +229,7 @@ recv_response_command(RPC, ID, Timeout) ->
     commands  => commands(),
 
     % ответ на последний обработанный запрос
-    reply     => {raft_rpc:endpoint(), raft_rpc:request_id(), reply()} | undefined
+    reply     => {[raft_rpc:endpoint()], raft_rpc:request_id(), reply()} | undefined
 }.
 -type role() ::
       {leader   , leader_state()}
@@ -563,8 +561,19 @@ has_quorum(N, #{options := #{cluster := Cluster}}) ->
     hstate().
 send_last_reply(HState = ?leader(#{reply := undefined})) ->
     HState;
-send_last_reply(HState = ?leader(LState = #{reply := {To, ID, Reply}})) ->
-    send_reply(To, ID, Reply, update_leader(LState#{reply := undefined}, HState)).
+send_last_reply(HState = ?leader(LState = #{reply := {Senders, ID, Reply}})) ->
+    send_reply_to_everyone(Senders, ID, Reply, update_leader(LState#{reply := undefined}, HState)).
+
+-spec send_reply_to_everyone([raft_rpc:endpoint()], raft_rpc:request_id(), reply_action(), hstate()) ->
+    hstate().
+send_reply_to_everyone(Senders, ID, Reply, HState) ->
+    lists:foldl(
+        fun(To, HStateAcc) ->
+            send_reply(To, ID, Reply, HStateAcc)
+        end,
+        HState,
+        Senders
+    ).
 
 -spec send_reply(raft_rpc:endpoint(), raft_rpc:request_id(), reply_action(), hstate()) ->
     hstate().
@@ -578,7 +587,12 @@ send_reply(To, ID, {reply, Reply}, HState) ->
 append_command(ID, From, Command, HState = ?leader(LState = #{commands := Commands}) = #{options := Options}) ->
     case erlang:length(Commands) < max_queue_length(Options) of
         true ->
-            update_leader(LState#{commands := lists:keystore(ID, 1, Commands, {ID, From, Command})}, HState);
+            NewCommandEntry =
+                case lists:keyfind(ID, 1, Commands) of
+                    {ID, Senders, Command} -> {ID, Senders, Command};
+                    false                  -> {ID, [From] , Command}
+                end,
+            update_leader(LState#{commands := lists:keystore(ID, 1, Commands, NewCommandEntry)}, HState);
         false ->
             % очередь заполнена, команду просто отбрасываем
             HState
@@ -850,8 +864,8 @@ try_handle_next_command(HState = ?leader(LState = #{commands := [NextRequest|Rem
     ?commit_idx(CommitIndex) = ?last_log_idx(LastLogIndex) = ?current_term(CurrentTerm) = HState,
     case LastLogIndex =:= CommitIndex orelse get_term(LastLogIndex, HState) < CurrentTerm of
         true ->
-            {ID, From, Command} = NextRequest,
-            handler_handle_command(ID, From, Command, update_leader(LState#{commands := RemainRequests}, HState));
+            {ID, Senders, Command} = NextRequest,
+            handler_handle_command(ID, Senders, Command, update_leader(LState#{commands := RemainRequests}, HState));
         false ->
             HState
     end;
@@ -948,16 +962,16 @@ handler_handle_surrend(HState = ?handler(Handler, HandlerState)) ->
 %%
 %% задача обработки идемпотентости лежит на обработчике
 %%
--spec handler_handle_command(raft_rpc:request_id(), raft_rpc:endpoint(), command(), hstate()) ->
+-spec handler_handle_command(raft_rpc:request_id(), [raft_rpc:endpoint()], command(), hstate()) ->
     hstate().
-handler_handle_command(ID, From, Command, HState = ?handler(Handler, HandlerState) = ?leader(LState = #{reply := undefined})) ->
+handler_handle_command(ID, Senders, Command, HState = ?handler(Handler, HandlerState) = ?leader(LState = #{reply := undefined})) ->
     {Reply, Delta, NewHandlerState} = raft_utils:apply_mod_opts(Handler, handle_command, [ID, Command, HandlerState]),
     NewHState = update_handler_state(HState, NewHandlerState),
     case Delta of
         undefined ->
-            send_reply(From, ID, Reply, NewHState);
+            send_reply_to_everyone(Senders, ID, Reply, NewHState);
         _ ->
-            append_and_send_log_entries(ID, Delta, update_leader(LState#{reply := {From, ID, Reply}}, NewHState))
+            append_and_send_log_entries(ID, Delta, update_leader(LState#{reply := {Senders, ID, Reply}}, NewHState))
     end.
 
 %% исполняется на любой ноде, очерёдность не определена, не может менять стейт
