@@ -29,6 +29,7 @@
 
 %% tests
 -export([base_test                /1]).
+-export([kill_minority_test       /1]).
 -export([cluster_simple_split_test/1]).
 -export([prop_test                /1]).
 
@@ -48,6 +49,7 @@
 all() ->
     [
         base_test,
+        kill_minority_test,
         cluster_simple_split_test,
         prop_test
     ].
@@ -83,6 +85,19 @@ end_per_suite(C) ->
 -spec base_test(config()) ->
     _.
 base_test(C) ->
+    Cluster = [Self|_] = ?config(cluster, C),
+    Options = raft_options(Cluster, Self),
+    Pids = start_cluster(Cluster),
+    _ = read_not_found(Options, key),
+    _ = write_success(Options, key, value),
+    _ = read_success(Options, key, value),
+    _ = remove_successfull(Options, key),
+    _ = read_not_found(Options, key),
+    stop_cluster(Pids).
+
+-spec kill_minority_test(config()) ->
+    _.
+kill_minority_test(C) ->
     Cluster = [Self|_] = ?config(cluster, C),
     Options = raft_options(Cluster, Self),
     Pids = start_cluster(Cluster),

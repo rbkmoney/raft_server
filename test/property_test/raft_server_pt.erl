@@ -133,12 +133,12 @@ remove(Key) ->
 
 start_server(Name) ->
     _ = start_server(?CLUSTER, Name),
-    timer:sleep(30).
+    timer:sleep(24).
 
 stop_server(Name) ->
     case raft_utils:gen_where_ref(Name) of
         undefined -> ok;
-        Pid       -> erlang:exit(Pid, kill), timer:sleep(30)
+        Pid       -> erlang:exit(Pid, kill), timer:sleep(24)
     end.
 
 %%
@@ -217,6 +217,7 @@ raft_options(Cluster, Self) ->
         log               => LogStorage,
         % log               => raft_server_log_memory,
         rpc               => {raft_rpc_tester, Self},
+        % rpc               => raft_rpc_erl,
         % logger            => raft_rpc_logger_io_plant_uml,
         logger            => undefined,
         random_seed       => {0, N, N * 10}
