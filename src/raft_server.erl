@@ -27,7 +27,7 @@
 %%%   -
 %%%  - доработки:
 %%%   - привести в порядок таймауты запросов к кластеру
-%%%   - компактизация стейта и оптимизация наливки свежего елемента группы
+%%%   - компактизация стейта и оптимизация наливки свежего лемента группы
 %%%   - поддержка асинхронной обработки запросов (чтобы не терять лидерство при долгих запросах)
 %%%   - внешние сериализаторы для rpc и msgpack реализация
 %%%   - сессия обращения
@@ -35,7 +35,6 @@
 %%%   - ресайз кластера (а нужно ли?)
 %%%   -
 %%%  - проблемы:
-%%%   - терять лидерство при отсутствии ответов от мажорити в течении election_timeout
 %%%   -
 %%%  - рефакторинг:
 %%%   - возможно стоит пересмотреть немного RPC, и сделать так, чтобы rpc знал своё имя, сам его регистрировать
@@ -217,6 +216,7 @@ recv_response_command(RPC, ID, Timeout) ->
 -record(follower_state, {
     heartbeat    :: timestamp_ms(),
     repl_timeout :: timestamp_ms(),
+    last_repl_ts :: timestamp_ms(),
     next_index   :: index(),
     match_index  :: maybe_index()
 }).
@@ -261,6 +261,7 @@ recv_response_command(RPC, ID, Timeout) ->
     handler  => handler(),
     options  => options(),
     timer    => raft_rpc_server:timer(),
+    now_ms   => timestamp_ms(),
     messages => [{raft_rpc:endpoint(), raft_rpc:message()}],
     state    => state()
 }.
@@ -293,6 +294,7 @@ hstate(Handler, Options, Timer, State) ->
         handler  => Handler,
         options  => Options,
         timer    => Timer,
+        now_ms   => erlang:system_time(millisecond),
         messages => [],
         state    => State
     }.
@@ -368,7 +370,10 @@ update_current_term_from_log(HState = #{state := State}) ->
 -spec handle_timeout_(hstate()) ->
     hstate().
 handle_timeout_(HState = ?leader) ->
-    try_send_append_entries(HState);
+    case has_quorum(count_active_followers(HState) + 1, HState) of
+        true  -> try_send_append_entries(HState);
+        false -> become_follower(HState)
+    end;
 handle_timeout_(HState = ?any_role) ->
     become_candidate(HState).
 
@@ -458,7 +463,7 @@ handle_rpc_response(request_vote, _, _, HState = ?any_role) ->
     % за меня проголосовали когда мне уже эти голоса не нужны
     % я уже либо лидер, либо фолловер
     HState;
-handle_rpc_response(append_entries, From, {AppendResult, FollowerLastLogIndex}, HState = ?leader) ->
+handle_rpc_response(append_entries, From, {AppendResult, FollowerLastLogIndex}, HState = ?leader = #{now_ms := Now}) ->
     #{options := Options} = ?leader(#{followers := FollowersState}) = HState,
     #follower_state{next_index = NextIndex, match_index = MatchIndex} = FollowerState = maps:get(From, FollowersState),
     {NewMatchIndex, NewNextIndex} =
@@ -474,7 +479,8 @@ handle_rpc_response(append_entries, From, {AppendResult, FollowerLastLogIndex}, 
         FollowerState#follower_state{
             match_index  = NewMatchIndex,
             next_index   = NewNextIndex,
-            repl_timeout = 0
+            repl_timeout = 0,
+            last_repl_ts = Now
         },
     try_send_append_entries(try_commit(update_leader_follower(From, NewFollowerState, HState)));
 handle_rpc_response(append_entries, _, _, HState = ?any_role) ->
@@ -558,6 +564,20 @@ is_replicated(Index, HState = ?leader(#{followers := FollowersState})) ->
     boolean().
 has_quorum(N, #{options := #{cluster := Cluster}}) ->
     N >= (erlang:length(Cluster) div 2 + 1).
+
+-spec count_active_followers(hstate()) ->
+    non_neg_integer().
+count_active_followers(?leader(#{followers := Followers}) = #{now_ms := Now, options := Options}) ->
+    maps:fold(
+        fun(_, Follower, NAcc) ->
+            case Follower#follower_state.last_repl_ts + min_election_timeout(Options) > Now of
+                true  -> NAcc + 1;
+                false -> NAcc
+            end
+        end,
+        0,
+        Followers
+    ).
 
 -spec send_last_reply(hstate()) ->
     hstate().
@@ -671,10 +691,11 @@ new_followers_state(HState = #{options := #{cluster := Cluster, self := Self}}) 
 
 -spec new_follower_state(hstate()) ->
     follower_state().
-new_follower_state(?last_log_idx(LastLogIndex)) ->
+new_follower_state(?last_log_idx(LastLogIndex) = #{now_ms := Now}) ->
     #follower_state{
         heartbeat    = 0,
         repl_timeout = 0,
+        last_repl_ts = Now,
         next_index   = LastLogIndex + 1,
         match_index  = 0
     }.
@@ -746,14 +767,13 @@ try_send_append_entries(HState = ?leader(LState = #{followers := FollowersState}
 
 -spec try_send_one_append_entries(raft_rpc:endpoint(), follower_state(), hstate()) ->
     {follower_state(), hstate()}.
-try_send_one_append_entries(To, FollowerState, HState) ->
+try_send_one_append_entries(To, FollowerState, HState = #{now_ms := Now}) ->
     ?last_log_idx(LastLogIndex) = #{options := #{broadcast_timeout := Timeout} = Options} = HState,
     #follower_state{
         heartbeat    = HeartbeatDate,
         repl_timeout = ReplTimeoutDate,
         next_index   = NextIndex
     } = FollowerState,
-    Now = now_ms(),
 
     case HeartbeatDate =< Now orelse ReplTimeoutDate =< Now andalso NextIndex =< LastLogIndex of
         true ->
@@ -806,16 +826,16 @@ send(From, To, Message, HState = #{messages := Messages}) ->
 %%
 -spec schedule_election_timer(hstate()) ->
     hstate().
-schedule_election_timer(HState = #{options := #{election_timeout := Timeout}}) ->
-    schedule_timer(now_ms() + randomize_timeout(Timeout), HState).
+schedule_election_timer(HState = #{options := #{election_timeout := Timeout}, now_ms := Now}) ->
+    schedule_timer(Now + randomize_timeout(Timeout), HState).
 
 -spec schedule_next_heartbeat_timer(hstate()) ->
     hstate().
-schedule_next_heartbeat_timer(HState = ?leader(#{followers := FollowersState})) ->
+schedule_next_heartbeat_timer(HState = ?leader(#{followers := FollowersState}) = #{now_ms := Now}) ->
     #{options := #{broadcast_timeout := BroadcastTimeout}} = HState,
     NextHeardbeat =
         lists:min(
-            [now_ms() + BroadcastTimeout] ++
+            [Now + BroadcastTimeout] ++
             lists_unzip_element(#follower_state.heartbeat, maps:values(FollowersState))
         ),
     schedule_timer(NextHeardbeat, HState).
@@ -824,11 +844,6 @@ schedule_next_heartbeat_timer(HState = ?leader(#{followers := FollowersState})) 
     hstate().
 schedule_timer(TimestampMS, HState) ->
     HState#{timer := TimestampMS}.
-
--spec now_ms() ->
-    timeout_ms().
-now_ms() ->
-    erlang:system_time(millisecond).
 
 -spec randomize_timeout(timeout_ms() | {From::timeout_ms(), To::timeout_ms()}) ->
     timeout_ms().
@@ -1026,6 +1041,14 @@ replication_batch(Options) ->
     pos_integer().
 max_queue_length(Options) ->
     maps:get(max_queue_length, Options, 10).
+
+-spec min_election_timeout(options()) ->
+    timeout_ms().
+min_election_timeout(#{election_timeout := TO}) ->
+    case TO of
+        {Min, _} -> Min;
+        Const    -> Const
+    end.
 
 -spec lists_unzip_element(pos_integer(), [tuple()]) ->
     _.

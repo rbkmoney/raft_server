@@ -228,7 +228,7 @@ raft_options(Cluster, Self) ->
     #{
         self              => Self,
         cluster           => Cluster,
-        election_timeout  => {6, 12},
+        election_timeout  => {6, 8},
         broadcast_timeout => 3,
         log               => LogStorage,
         % log               => raft_server_log_memory,
