@@ -19,7 +19,7 @@
 %%%  - ловить эвенты от лидер-группы (например о перееизбрании)
 %%%  -
 %%%
--module(raft_SUITE).
+-module(raft_server_SUITE).
 -include_lib("common_test/include/ct.hrl").
 
 %% tests descriptions
