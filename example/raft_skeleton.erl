@@ -63,37 +63,37 @@ async_command(#{rpc := RPC, cluster := Cluster}) ->
 -type state() :: state.
 -type delta() :: delta.
 
--spec init(_) ->
+-spec init(_, _) ->
     {raft_server:maybe_index(), state()}.
-init(_) ->
+init(_, _) ->
     {0, state}.
 
--spec handle_election(_, state()) ->
+-spec handle_election(_, _, state()) ->
     {undefined, state()}.
-handle_election(_, state) ->
+handle_election(_, _, state) ->
     {undefined, state}.
 
--spec handle_surrend(_, state()) ->
+-spec handle_surrend(_, _, state()) ->
     state().
-handle_surrend(_, state) ->
+handle_surrend(_, _, state) ->
     state.
 
--spec handle_async_command(_, raft_rpc:request_id(), async_command(), state()) ->
+-spec handle_async_command(_, raft_rpc:request_id(), async_command(), _, state()) ->
     {raft_server:reply_action(), state()}.
-handle_async_command(_, _, async_command, state) ->
+handle_async_command(_, _, async_command, _, state) ->
     {{reply, ok}, state}.
 
--spec handle_command(raft_utils:gen_ref(), raft_rpc:request_id(), sync_command(), state()) ->
+-spec handle_command(raft_utils:gen_ref(), raft_rpc:request_id(), sync_command(), _, state()) ->
     {raft_server:reply_action(), delta() | undefined, state()}.
-handle_command(_, _, sync_command, state) ->
+handle_command(_, _, sync_command, _, state) ->
     {{reply, ok}, delta, state}.
 
--spec handle_info(_, _Info, state()) ->
+-spec handle_info(_, _Info, _, state()) ->
     {undefined, state()}.
-handle_info(_, _Info, state) ->
+handle_info(_, _Info, _, state) ->
     {undefined, state}.
 
--spec apply_delta(_, raft_rpc:request_id(), delta(), state()) ->
+-spec apply_delta(_, raft_rpc:request_id(), delta(), _, state()) ->
     state().
-apply_delta(_, _, delta, state) ->
+apply_delta(_, _, delta, _, state) ->
     state.

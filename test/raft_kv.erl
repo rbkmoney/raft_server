@@ -25,7 +25,7 @@
 
 %% raft_server
 -behaviour(raft_server).
--export([init/1, handle_election/2, handle_surrend/2, handle_command/4, handle_async_command/4, handle_info/3, apply_delta/4]).
+-export([init/2, handle_election/3, handle_surrend/3, handle_command/5, handle_async_command/5, handle_info/4, apply_delta/5]).
 
 %%
 %% API
@@ -100,46 +100,46 @@ retry(#{election_timeout := ElectionTimeout, broadcast_timeout := BroadcastTimeo
 -type state() :: #{_Key => _Value}.
 -type delta() :: write_command().
 
--spec init(_) ->
+-spec init(_, _) ->
     {raft_server:maybe_index(), state()}.
-init(_) ->
+init(_, _) ->
     {0, #{}}.
 
--spec handle_election(_, state()) ->
+-spec handle_election(_, _, state()) ->
     {delta() | undefined, state()}.
-handle_election(_, State) ->
+handle_election(_, _, State) ->
     {undefined, State}.
 
--spec handle_surrend(_, state()) ->
+-spec handle_surrend(_, _, state()) ->
     state().
-handle_surrend(_, State) ->
+handle_surrend(_, _, State) ->
     State.
 
--spec handle_async_command(_, raft_rpc:request_id(), async_command(), state()) ->
+-spec handle_async_command(_, raft_rpc:request_id(), async_command(), _, state()) ->
     {raft_server:reply_action(), state()}.
-handle_async_command(_, _, {get, Key}, State) ->
+handle_async_command(_, _, {get, Key}, _, State) ->
     {reply, do_get(Key, State), State}.
 
--spec handle_command(raft_utils:gen_ref(), raft_rpc:request_id(), sync_command(), state()) ->
+-spec handle_command(raft_utils:gen_ref(), raft_rpc:request_id(), sync_command(), _, state()) ->
     {raft_server:reply_action(), delta() | undefined, state()}.
-handle_command(_, _, {get, Key}, State) ->
+handle_command(_, _, {get, Key}, _, State) ->
     {{reply, do_get(Key, State)}, undefined, State};
-handle_command(_, _, Put = {put, _, _}, State) ->
+handle_command(_, _, Put = {put, _, _}, _, State) ->
     {{reply, ok}, Put, State};
-handle_command(_, _, Remove = {remove, _}, State) ->
+handle_command(_, _, Remove = {remove, _}, _, State) ->
     {{reply, ok}, Remove, State}.
 
--spec handle_info(_, _Info, state()) ->
+-spec handle_info(_, _Info, _, state()) ->
     {undefined, state()}.
-handle_info(_, Info, State) ->
+handle_info(_, Info, _, State) ->
     ok = error_logger:error_msg("unexpected info received: ~p", [Info]),
     {undefined, State}.
 
--spec apply_delta(_, raft_rpc:request_id(), delta(), state()) ->
+-spec apply_delta(_, raft_rpc:request_id(), delta(), _, state()) ->
     state().
-apply_delta(_, _, {put, Key, Value}, State) ->
+apply_delta(_, _, {put, Key, Value}, _, State) ->
     do_put(Key, Value, State);
-apply_delta(_, _, {remove, Key}, State) ->
+apply_delta(_, _, {remove, Key}, _, State) ->
     do_remove(Key, State).
 
 %%

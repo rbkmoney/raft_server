@@ -42,6 +42,7 @@
 %%%     и отдавал по запросу
 %%%   - убрать raft_utils и перенести всё в genlib
 %%%   - распилить и привести в порядок raft_server.erl, больно он большой
+%%%   - переименовать raft_server_log в raft_server_log_storage
 %%%   -
 %%%  - тестирование:
 %%%   - отдельные тесты для rpc
@@ -64,6 +65,7 @@
 -export_type([log_entry    /0]).
 -export_type([handler      /0]).
 -export_type([handler_state/0]).
+-export_type([log          /0]).
 -export_type([state        /0]).
 -export([start_link        /3]).
 -export([send_command      /5]).
@@ -114,35 +116,35 @@
 
 -type handler      () :: raft_utils:mod_opts().
 -type handler_state() :: _.
-
+-type log          () :: {raft_server_log:log(), raft_server_log:state()}.
 
 %%
 %% behaviour
 %%
--callback init(_) ->
+-callback init(_, log()) ->
     {maybe_index(), handler_state()}.
 
--callback handle_election(_, handler_state()) ->
+-callback handle_election(_, log(), handler_state()) ->
     {maybe_delta(), handler_state()}.
 
--callback handle_surrend(_, handler_state()) ->
+-callback handle_surrend(_, log(), handler_state()) ->
     handler_state().
 
--callback handle_async_command(_, raft_rpc:request_id(), command(), handler_state()) ->
+-callback handle_async_command(_, raft_rpc:request_id(), command(), log(), handler_state()) ->
     {reply_action(), handler_state()}.
 
--callback handle_command(_, raft_rpc:request_id(), command(), handler_state()) ->
+-callback handle_command(_, raft_rpc:request_id(), command(), log(), handler_state()) ->
     {reply_action(), maybe_delta(), handler_state()}.
 
 %% only leader
--callback handle_info(_, _Info, handler_state()) ->
+-callback handle_info(_, _Info, log(), handler_state()) ->
     {maybe_delta(), handler_state()}.
 
 %% применение происходит только после консенсусного принятия этого изменения
--callback apply_delta(_, raft_rpc:request_id(), delta(), handler_state()) ->
+
+-callback apply_delta(_, raft_rpc:request_id(), delta(), log(), handler_state()) ->
     handler_state().
 
-%%
 
 %% Версия без регистрации не имеет смысла (или я не прав? похоже, что прав, работа по пидам смысла не имеет).
 %% А как же общение по RPC? Тут похоже обратное — версия с регистрацией не нужна
@@ -336,7 +338,7 @@ random_seed(Options) ->
 new_state(Handler, #{log := Log}) ->
     LogState = log_init(Log),
 
-    {ApplyIndex, HandlerState} = handler_init(Handler),
+    {ApplyIndex, HandlerState} = handler_init({Log, LogState}, Handler),
     #{
         role             => {follower, undefined},
         current_term     => 0, % will be updated soon
@@ -947,17 +949,17 @@ log_append(From, Entries, HState = ?log(Log, LogState) = #{state := State}) ->
 %%
 %% interaction with handler
 %%
--spec handler_init(handler()) ->
+-spec handler_init(log(), handler()) ->
     handler_state().
-handler_init(Handler) ->
-    raft_utils:apply_mod_opts(Handler, init, []).
+handler_init(Log, Handler) ->
+    raft_utils:apply_mod_opts(Handler, init, [Log]).
 
 -define(handler(Handler, HandlerState), #{handler := Handler, state := #{handler_state := HandlerState}}).
 
 -spec handler_handle_election(hstate()) ->
     hstate().
 handler_handle_election(HState = ?handler(Handler, HandlerState)) ->
-    {Delta, NewHandlerState} = raft_utils:apply_mod_opts(Handler, handle_election, [HandlerState]),
+    {Delta, NewHandlerState} = raft_utils:apply_mod_opts(Handler, handle_election, [log(HState), HandlerState]),
     NewState = update_handler_state(HState, NewHandlerState),
     case Delta of
         undefined ->
@@ -970,7 +972,8 @@ handler_handle_election(HState = ?handler(Handler, HandlerState)) ->
 -spec handler_handle_surrend(hstate()) ->
     hstate().
 handler_handle_surrend(HState = ?handler(Handler, HandlerState)) ->
-    NewHandlerState = raft_utils:apply_mod_opts(Handler, handle_surrend, [HandlerState]),
+    NewHandlerState =
+        raft_utils:apply_mod_opts(Handler, handle_surrend, [log(HState), HandlerState]),
     update_handler_state(HState, NewHandlerState).
 
 %%
@@ -983,7 +986,8 @@ handler_handle_surrend(HState = ?handler(Handler, HandlerState)) ->
 -spec handler_handle_command(raft_rpc:request_id(), [raft_rpc:endpoint()], command(), hstate()) ->
     hstate().
 handler_handle_command(ID, Senders, Command, HState = ?handler(Handler, HandlerState) = ?leader(LState = #{reply := undefined})) ->
-    {Reply, Delta, NewHandlerState} = raft_utils:apply_mod_opts(Handler, handle_command, [ID, Command, HandlerState]),
+    {Reply, Delta, NewHandlerState} =
+        raft_utils:apply_mod_opts(Handler, handle_command, [ID, Command, log(HState), HandlerState]),
     NewHState = update_handler_state(HState, NewHandlerState),
     case Delta of
         undefined ->
@@ -996,13 +1000,14 @@ handler_handle_command(ID, Senders, Command, HState = ?handler(Handler, HandlerS
 -spec handler_handle_async_command(raft_rpc:endpoint(), raft_rpc:request_id(), command(), hstate()) ->
     hstate().
 handler_handle_async_command(From, ID, Command, HState = ?handler(Handler, HandlerState)) ->
-    {Reply, NewHandlerState} = raft_utils:apply_mod_opts(Handler, handle_async_command, [ID, Command, HandlerState]),
+    {Reply, NewHandlerState} =
+        raft_utils:apply_mod_opts(Handler, handle_async_command, [ID, Command, log(HState), HandlerState]),
     send_reply(From, ID, Reply, update_handler_state(HState, NewHandlerState)).
 
 -spec handler_handle_info(_Info, hstate()) ->
     hstate().
 handler_handle_info(Info, HState = ?handler(Handler, HandlerState)) ->
-    {Delta, NewHandlerState} = raft_utils:apply_mod_opts(Handler, handle_info, [Info, HandlerState]),
+    {Delta, NewHandlerState} = raft_utils:apply_mod_opts(Handler, handle_info, [Info, log(HState), HandlerState]),
     NewState = update_handler_state(HState, NewHandlerState),
     case Delta of
         undefined ->
@@ -1016,7 +1021,7 @@ handler_handle_info(Info, HState = ?handler(Handler, HandlerState)) ->
 handler_apply_delta(_, undefined, HState) ->
     HState;
 handler_apply_delta(ID, Delta, HState = ?handler(Handler, HandlerState)) ->
-    NewHandlerState = raft_utils:apply_mod_opts(Handler, apply_delta, [ID, Delta, HandlerState]),
+    NewHandlerState = raft_utils:apply_mod_opts(Handler, apply_delta, [ID, Delta, log(HState), HandlerState]),
     update_handler_state(HState, NewHandlerState).
 
 
@@ -1024,6 +1029,12 @@ handler_apply_delta(ID, Delta, HState = ?handler(Handler, HandlerState)) ->
     hstate().
 update_handler_state(HState = #{state := State}, NewHandlerState) ->
     HState#{state := State#{handler_state := NewHandlerState}}.
+
+%% TODO выделить наконец-то log_storage
+-spec log(hstate()) ->
+    log().
+log(#{options := #{log := Log}, state := #{log_state := LogState}}) ->
+    {Log, LogState}.
 
 %%
 %% utils
