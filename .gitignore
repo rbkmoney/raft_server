@@ -11,3 +11,4 @@ erl_crash.dump
 .tags*
 .rebar3/
 ebin/
+dockross
